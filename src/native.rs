@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use duroxide::providers::{
-    DispatcherCapabilityFilter, ExecutionMetadata, KvEntry, OrchestrationItem, Provider,
-    ProviderAdmin, ProviderError, ScheduledActivityIdentifier, SessionFetchConfig, TagFilter,
-    WorkItem,
+    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
+    InstanceFilter, InstanceInfo, KvEntry, OrchestrationItem, Provider, ProviderAdmin,
+    ProviderError, PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier,
+    SessionFetchConfig, SystemMetrics, TagFilter, WorkItem,
 };
 use duroxide::{Event, EventKind, SystemStats};
 use libsql::{Value, params};
@@ -16,6 +17,8 @@ pub struct NativeLibsqlProvider {
 }
 
 impl NativeLibsqlProvider {
+    const SCHEMA_VERSION: i64 = 1;
+
     pub async fn new(config: LibsqlDatabaseConfig) -> Result<Self, LibsqlProviderInitError> {
         match config {
             LibsqlDatabaseConfig::InMemory => Self::new_local(":memory:").await,
@@ -91,9 +94,54 @@ impl NativeLibsqlProvider {
 
     async fn create_schema(&self) -> libsql::Result<()> {
         let conn = self.db.connect()?;
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS libsql_durable_schema_versions (
+                version INTEGER PRIMARY KEY,
+                applied_at_ms INTEGER NOT NULL,
+                description TEXT NOT NULL
+            )
+            "#,
+            (),
+        )
+        .await?;
+
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(MAX(version), 0) FROM libsql_durable_schema_versions",
+                (),
+            )
+            .await?;
+        let existing_version = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?
+            .unwrap_or(0);
+        drop(rows);
+        if existing_version > Self::SCHEMA_VERSION {
+            return Err(libsql::Error::ConnectionFailed(format!(
+                "database schema version {existing_version} is newer than supported version {}",
+                Self::SCHEMA_VERSION
+            )));
+        }
+
         for statement in SCHEMA_STATEMENTS {
             conn.execute(statement, ()).await?;
         }
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO libsql_durable_schema_versions
+                (version, applied_at_ms, description)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                Self::SCHEMA_VERSION,
+                Self::now_millis(),
+                "initial libsql-durable native schema"
+            ],
+        )
+        .await?;
         Ok(())
     }
 
@@ -200,7 +248,7 @@ impl NativeLibsqlProvider {
 
     fn orchestrator_visible_at(item: &WorkItem, delay: Option<Duration>) -> i64 {
         match item {
-            WorkItem::TimerFired { fire_at_ms, .. } => *fire_at_ms as i64,
+            WorkItem::TimerFired { fire_at_ms, .. } if *fire_at_ms > 0 => *fire_at_ms as i64,
             _ => delay
                 .map(Self::timestamp_after)
                 .unwrap_or_else(Self::now_millis),
@@ -236,6 +284,42 @@ impl NativeLibsqlProvider {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn placeholders(count: usize, start_param: usize) -> String {
+        (0..count)
+            .map(|idx| format!("?{}", idx + start_param))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn instance_values(ids: &[String]) -> Vec<Value> {
+        ids.iter().cloned().map(Value::Text).collect()
+    }
+
+    async fn count_rows(
+        tx: &libsql::Transaction,
+        sql: &str,
+        params: Vec<Value>,
+        operation: &'static str,
+    ) -> Result<u64, ProviderError> {
+        let mut rows = tx
+            .query(sql, params)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?;
+        let count = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?
+            .map(|row| row.get::<i64>(0))
+            .transpose()
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?
+            .unwrap_or(0);
+        Ok(count as u64)
+    }
+
+    fn admin_not_found(operation: &'static str, instance: &str) -> ProviderError {
+        ProviderError::permanent(operation, format!("Instance not found: {instance}"))
     }
 
     async fn append_history(
@@ -1793,7 +1877,7 @@ impl Provider for NativeLibsqlProvider {
     }
 
     fn as_management_capability(&self) -> Option<&dyn ProviderAdmin> {
-        None
+        Some(self)
     }
 
     async fn get_custom_status(
@@ -2087,5 +2171,810 @@ impl Provider for NativeLibsqlProvider {
             kv_user_key_count: kv_user_key_count as u64,
             kv_total_value_bytes: kv_total_value_bytes as u64,
         }))
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderAdmin for NativeLibsqlProvider {
+    async fn list_instances(&self) -> Result<Vec<String>, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("list_instances", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT instance_id FROM instances ORDER BY created_at DESC, instance_id DESC",
+                (),
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_instances", e))?;
+        let mut instances = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_instances", e))?
+        {
+            instances.push(
+                row.get::<String>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("list_instances", e))?,
+            );
+        }
+        Ok(instances)
+    }
+
+    async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("list_instances_by_status", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT i.instance_id
+                FROM instances i
+                JOIN executions e
+                  ON e.instance_id = i.instance_id
+                 AND e.execution_id = i.current_execution_id
+                WHERE e.status = ?1
+                ORDER BY i.created_at DESC, i.instance_id DESC
+                "#,
+                params![status],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_instances_by_status", e))?;
+        let mut instances = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_instances_by_status", e))?
+        {
+            instances.push(
+                row.get::<String>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("list_instances_by_status", e))?,
+            );
+        }
+        Ok(instances)
+    }
+
+    async fn list_executions(&self, instance: &str) -> Result<Vec<u64>, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT execution_id FROM executions WHERE instance_id = ?1 ORDER BY execution_id",
+                params![instance],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?;
+        let mut executions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?
+        {
+            executions.push(
+                row.get::<i64>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?
+                    as u64,
+            );
+        }
+        Ok(executions)
+    }
+
+    async fn read_history_with_execution_id(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<Vec<Event>, ProviderError> {
+        self.read_with_execution(instance, execution_id).await
+    }
+
+    async fn read_history(&self, instance: &str) -> Result<Vec<Event>, ProviderError> {
+        self.read(instance).await
+    }
+
+    async fn latest_execution_id(&self, instance: &str) -> Result<u64, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT current_execution_id FROM instances WHERE instance_id = ?1",
+                params![instance],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?;
+        rows.next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?
+            .map(|row| row.get::<i64>(0))
+            .transpose()
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?
+            .map(|id| id as u64)
+            .ok_or_else(|| Self::admin_not_found("latest_execution_id", instance))
+    }
+
+    async fn get_instance_info(&self, instance: &str) -> Result<InstanceInfo, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT i.instance_id,
+                       i.orchestration_name,
+                       COALESCE(i.orchestration_version, ''),
+                       i.current_execution_id,
+                       e.status,
+                       e.output,
+                       COALESCE(e.started_at, 0),
+                       COALESCE(i.updated_at, 0),
+                       i.parent_instance_id
+                FROM instances i
+                JOIN executions e
+                  ON e.instance_id = i.instance_id
+                 AND e.execution_id = i.current_execution_id
+                WHERE i.instance_id = ?1
+                "#,
+                params![instance],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
+        else {
+            return Err(Self::admin_not_found("get_instance_info", instance));
+        };
+
+        let output = match row
+            .get_value(5)
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
+        {
+            Value::Text(value) => Some(value),
+            Value::Null => None,
+            _ => None,
+        };
+        let parent_instance_id = match row
+            .get_value(8)
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
+        {
+            Value::Text(value) => Some(value),
+            Value::Null => None,
+            _ => None,
+        };
+
+        Ok(InstanceInfo {
+            instance_id: row
+                .get::<String>(0)
+                .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?,
+            orchestration_name: row
+                .get::<String>(1)
+                .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?,
+            orchestration_version: row
+                .get::<String>(2)
+                .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?,
+            current_execution_id: row
+                .get::<i64>(3)
+                .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
+                as u64,
+            status: row
+                .get::<String>(4)
+                .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?,
+            output,
+            created_at: 0,
+            updated_at: 0,
+            parent_instance_id,
+        })
+    }
+
+    async fn get_execution_info(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<ExecutionInfo, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT e.execution_id,
+                       e.status,
+                       e.output,
+                       e.started_at,
+                       e.completed_at,
+                       COUNT(h.event_id)
+                FROM executions e
+                LEFT JOIN history h
+                  ON h.instance_id = e.instance_id
+                 AND h.execution_id = e.execution_id
+                WHERE e.instance_id = ?1 AND e.execution_id = ?2
+                GROUP BY e.instance_id, e.execution_id
+                "#,
+                params![instance, execution_id as i64],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+        else {
+            return Err(Self::admin_not_found("get_execution_info", instance));
+        };
+        let output = match row
+            .get_value(2)
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+        {
+            Value::Text(value) => Some(value),
+            Value::Null => None,
+            _ => None,
+        };
+        let completed_at = match row
+            .get_value(4)
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+        {
+            Value::Integer(value) => Some(value as u64),
+            Value::Null => None,
+            _ => None,
+        };
+        Ok(ExecutionInfo {
+            execution_id: row
+                .get::<i64>(0)
+                .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+                as u64,
+            status: row
+                .get::<String>(1)
+                .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?,
+            output,
+            started_at: 0,
+            completed_at,
+            event_count: row
+                .get::<i64>(5)
+                .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+                as usize,
+        })
+    }
+
+    async fn get_system_metrics(&self) -> Result<SystemMetrics, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT COUNT(DISTINCT i.instance_id),
+                       COUNT(e.execution_id),
+                       COALESCE(SUM(CASE WHEN e.status = 'Running' THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN e.status = 'Completed' THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN e.status = 'Failed' THEN 1 ELSE 0 END), 0),
+                       (SELECT COUNT(*) FROM history)
+                FROM instances i
+                LEFT JOIN executions e ON e.instance_id = i.instance_id
+                "#,
+                (),
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+            .ok_or_else(|| ProviderError::permanent("get_system_metrics", "Missing metrics row"))?;
+        Ok(SystemMetrics {
+            total_instances: row
+                .get::<i64>(0)
+                .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+                as u64,
+            total_executions: row
+                .get::<i64>(1)
+                .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+                as u64,
+            running_instances: row
+                .get::<i64>(2)
+                .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+                as u64,
+            completed_instances: row
+                .get::<i64>(3)
+                .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+                as u64,
+            failed_instances: row
+                .get::<i64>(4)
+                .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+                as u64,
+            total_events: row
+                .get::<i64>(5)
+                .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+                as u64,
+        })
+    }
+
+    async fn get_queue_depths(&self) -> Result<QueueDepths, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?;
+        let now_ms = Self::now_millis();
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                  (SELECT COUNT(*) FROM orchestrator_queue
+                   WHERE visible_at <= ?1 AND (lock_token IS NULL OR locked_until <= ?2)),
+                  (SELECT COUNT(*) FROM worker_queue
+                   WHERE visible_at <= ?3 AND (lock_token IS NULL OR locked_until <= ?4)),
+                  (SELECT COUNT(*) FROM orchestrator_queue
+                   WHERE visible_at > ?5)
+                "#,
+                params![now_ms, now_ms, now_ms, now_ms, now_ms],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?
+            .ok_or_else(|| ProviderError::permanent("get_queue_depths", "Missing queue row"))?;
+        Ok(QueueDepths {
+            orchestrator_queue: row
+                .get::<i64>(0)
+                .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?
+                as usize,
+            worker_queue: row
+                .get::<i64>(1)
+                .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?
+                as usize,
+            timer_queue: row
+                .get::<i64>(2)
+                .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?
+                as usize,
+        })
+    }
+
+    async fn list_children(&self, instance_id: &str) -> Result<Vec<String>, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("list_children", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT instance_id FROM instances WHERE parent_instance_id = ?1 ORDER BY instance_id",
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_children", e))?;
+        let mut children = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_children", e))?
+        {
+            children.push(
+                row.get::<String>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("list_children", e))?,
+            );
+        }
+        Ok(children)
+    }
+
+    async fn get_parent_id(&self, instance_id: &str) -> Result<Option<String>, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT parent_instance_id FROM instances WHERE instance_id = ?1",
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?
+        else {
+            return Err(Self::admin_not_found("get_parent_id", instance_id));
+        };
+        match row
+            .get_value(0)
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?
+        {
+            Value::Text(value) => Ok(Some(value)),
+            Value::Null => Ok(None),
+            _ => Ok(None),
+        }
+    }
+
+    async fn delete_instances_atomic(
+        &self,
+        ids: &[String],
+        force: bool,
+    ) -> Result<DeleteInstanceResult, ProviderError> {
+        if ids.is_empty() {
+            return Ok(DeleteInstanceResult::default());
+        }
+
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        let placeholders = Self::placeholders(ids.len(), 1);
+        let values = Self::instance_values(ids);
+
+        let existing_instances = Self::count_rows(
+            &tx,
+            &format!("SELECT COUNT(*) FROM instances WHERE instance_id IN ({placeholders})"),
+            values.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        if existing_instances != ids.len() as u64 {
+            tx.rollback().await.ok();
+            return Err(ProviderError::permanent(
+                "delete_instances_atomic",
+                "One or more instances were not found",
+            ));
+        }
+
+        if !force {
+            let running = Self::count_rows(
+                &tx,
+                &format!(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM instances i
+                    JOIN executions e
+                      ON e.instance_id = i.instance_id
+                     AND e.execution_id = i.current_execution_id
+                    WHERE i.instance_id IN ({placeholders}) AND e.status = 'Running'
+                    "#
+                ),
+                values.clone(),
+                "delete_instances_atomic",
+            )
+            .await?;
+            if running > 0 {
+                tx.rollback().await.ok();
+                return Err(ProviderError::permanent(
+                    "delete_instances_atomic",
+                    "Cannot delete running instances without force",
+                ));
+            }
+        }
+
+        let orphaned_children = Self::count_rows(
+            &tx,
+            &format!(
+                r#"
+                SELECT COUNT(*)
+                FROM instances
+                WHERE parent_instance_id IN ({placeholders})
+                  AND instance_id NOT IN ({placeholders})
+                "#
+            ),
+            values
+                .iter()
+                .cloned()
+                .chain(values.iter().cloned())
+                .collect(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        if orphaned_children > 0 {
+            tx.rollback().await.ok();
+            return Err(ProviderError::permanent(
+                "delete_instances_atomic",
+                "Deleting these instances would orphan child instances",
+            ));
+        }
+
+        let executions_deleted = Self::count_rows(
+            &tx,
+            &format!("SELECT COUNT(*) FROM executions WHERE instance_id IN ({placeholders})"),
+            values.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        let events_deleted = Self::count_rows(
+            &tx,
+            &format!("SELECT COUNT(*) FROM history WHERE instance_id IN ({placeholders})"),
+            values.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        let orchestrator_queue_deleted = Self::count_rows(
+            &tx,
+            &format!(
+                "SELECT COUNT(*) FROM orchestrator_queue WHERE instance_id IN ({placeholders})"
+            ),
+            values.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        let worker_queue_deleted = Self::count_rows(
+            &tx,
+            &format!("SELECT COUNT(*) FROM worker_queue WHERE instance_id IN ({placeholders})"),
+            values.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+
+        for table in [
+            "history",
+            "executions",
+            "orchestrator_queue",
+            "worker_queue",
+            "instance_locks",
+            "kv_store",
+            "kv_delta",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE instance_id IN ({placeholders})"),
+                values.clone(),
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        }
+        tx.execute(
+            &format!("DELETE FROM instances WHERE instance_id IN ({placeholders})"),
+            values.clone(),
+        )
+        .await
+        .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        tx.execute(
+            r#"
+            DELETE FROM sessions
+            WHERE NOT EXISTS (
+                SELECT 1 FROM worker_queue WHERE worker_queue.session_id = sessions.session_id
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+
+        Ok(DeleteInstanceResult {
+            instances_deleted: existing_instances,
+            executions_deleted,
+            events_deleted,
+            queue_messages_deleted: orchestrator_queue_deleted + worker_queue_deleted,
+        })
+    }
+
+    async fn delete_instance_bulk(
+        &self,
+        filter: InstanceFilter,
+    ) -> Result<DeleteInstanceResult, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("delete_instance_bulk", e))?;
+
+        let mut conditions = vec![
+            "e.status != 'Running'".to_string(),
+            "i.parent_instance_id IS NULL".to_string(),
+        ];
+        let mut values = Vec::new();
+        if let Some(ids) = &filter.instance_ids {
+            if ids.is_empty() {
+                return Ok(DeleteInstanceResult::default());
+            }
+            let start = values.len() + 1;
+            conditions.push(format!(
+                "i.instance_id IN ({})",
+                Self::placeholders(ids.len(), start)
+            ));
+            values.extend(Self::instance_values(ids));
+        }
+        if let Some(completed_before) = filter.completed_before {
+            values.push(Value::Integer(completed_before as i64));
+            conditions.push(format!(
+                "e.completed_at IS NOT NULL AND e.completed_at < ?{}",
+                values.len()
+            ));
+        }
+        let limit = filter.limit.unwrap_or(1000).max(1);
+        values.push(Value::Integer(limit as i64));
+        let sql = format!(
+            r#"
+            SELECT i.instance_id
+            FROM instances i
+            JOIN executions e
+              ON e.instance_id = i.instance_id
+             AND e.execution_id = i.current_execution_id
+            WHERE {}
+            ORDER BY e.completed_at, i.instance_id
+            LIMIT ?{}
+            "#,
+            conditions.join(" AND "),
+            values.len()
+        );
+        let mut rows = conn
+            .query(&sql, values)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instance_bulk", e))?;
+        let mut root_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instance_bulk", e))?
+        {
+            root_ids.push(
+                row.get::<String>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("delete_instance_bulk", e))?,
+            );
+        }
+        drop(rows);
+
+        let mut all_ids = Vec::new();
+        for root_id in root_ids {
+            let tree = self.get_instance_tree(&root_id).await?;
+            all_ids.extend(tree.all_ids);
+        }
+        all_ids.sort();
+        all_ids.dedup();
+
+        if all_ids.is_empty() {
+            return Ok(DeleteInstanceResult::default());
+        }
+        self.delete_instances_atomic(&all_ids, false).await
+    }
+
+    async fn prune_executions(
+        &self,
+        instance_id: &str,
+        options: PruneOptions,
+    ) -> Result<PruneResult, ProviderError> {
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+
+        let mut rows = tx
+            .query(
+                "SELECT current_execution_id FROM instances WHERE instance_id = ?1",
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?
+        else {
+            tx.rollback().await.ok();
+            return Err(Self::admin_not_found("prune_executions", instance_id));
+        };
+        let current_execution_id = row
+            .get::<i64>(0)
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+        drop(rows);
+
+        let keep_last = options.keep_last.unwrap_or(1).max(1) as i64;
+        let mut values = vec![
+            Value::Text(instance_id.to_string()),
+            Value::Integer(current_execution_id),
+            Value::Integer(keep_last),
+        ];
+        let mut conditions = vec![
+            "instance_id = ?1".to_string(),
+            "execution_id != ?2".to_string(),
+            "status != 'Running'".to_string(),
+            "execution_id NOT IN (SELECT execution_id FROM executions WHERE instance_id = ?1 ORDER BY execution_id DESC LIMIT ?3)".to_string(),
+        ];
+        if let Some(completed_before) = options.completed_before {
+            values.push(Value::Integer(completed_before as i64));
+            conditions.push(format!(
+                "completed_at IS NOT NULL AND completed_at < ?{}",
+                values.len()
+            ));
+        }
+        let where_clause = conditions.join(" AND ");
+        let history_deleted = Self::count_rows(
+            &tx,
+            &format!(
+                "SELECT COUNT(*) FROM history WHERE instance_id = ?1 AND execution_id IN (SELECT execution_id FROM executions WHERE {where_clause})"
+            ),
+            values.clone(),
+            "prune_executions",
+        )
+        .await?;
+        let executions_deleted = Self::count_rows(
+            &tx,
+            &format!("SELECT COUNT(*) FROM executions WHERE {where_clause}"),
+            values.clone(),
+            "prune_executions",
+        )
+        .await?;
+
+        tx.execute(
+            &format!(
+                "DELETE FROM history WHERE instance_id = ?1 AND execution_id IN (SELECT execution_id FROM executions WHERE {where_clause})"
+            ),
+            values.clone(),
+        )
+        .await
+        .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+        tx.execute(
+            &format!("DELETE FROM executions WHERE {where_clause}"),
+            values,
+        )
+        .await
+        .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+
+        Ok(PruneResult {
+            instances_processed: 1,
+            executions_deleted,
+            events_deleted: history_deleted,
+        })
+    }
+
+    async fn prune_executions_bulk(
+        &self,
+        filter: InstanceFilter,
+        options: PruneOptions,
+    ) -> Result<PruneResult, ProviderError> {
+        let mut candidates = match filter.instance_ids {
+            Some(ids) => ids,
+            None => self.list_instances().await?,
+        };
+        if let Some(limit) = filter.limit {
+            candidates.truncate(limit as usize);
+        }
+
+        let mut total = PruneResult::default();
+        for instance_id in candidates {
+            if let Some(completed_before) = filter.completed_before {
+                let info = match self.get_instance_info(&instance_id).await {
+                    Ok(info) => info,
+                    Err(_) => continue,
+                };
+                if info.status == "Running" {
+                    // Running instances may still prune historical executions.
+                } else {
+                    let execution = self
+                        .get_execution_info(&instance_id, info.current_execution_id)
+                        .await?;
+                    match execution.completed_at {
+                        Some(completed_at) if completed_at < completed_before => {}
+                        _ => continue,
+                    }
+                }
+            }
+
+            if let Ok(result) = self.prune_executions(&instance_id, options.clone()).await {
+                if result.executions_deleted > 0 {
+                    total.instances_processed += result.instances_processed;
+                    total.executions_deleted += result.executions_deleted;
+                    total.events_deleted += result.events_deleted;
+                }
+            }
+        }
+        Ok(total)
     }
 }

@@ -104,3 +104,61 @@ async fn libsql_large_payload_stress_smoke() {
         result.success_rate()
     );
 }
+
+#[cfg(feature = "native-libsql")]
+struct RemoteLibsqlFactory {
+    config: LibsqlDatabaseConfig,
+}
+
+#[cfg(feature = "native-libsql")]
+#[async_trait::async_trait]
+impl ProviderStressFactory for RemoteLibsqlFactory {
+    async fn create_provider(&self) -> Arc<dyn Provider> {
+        Arc::new(
+            LibsqlProvider::new(self.config.clone())
+                .await
+                .expect("failed to create remote LibsqlProvider"),
+        )
+    }
+}
+
+#[cfg(feature = "native-libsql")]
+#[tokio::test]
+async fn libsql_remote_parallel_orchestrations_stress_smoke_when_configured() {
+    let Ok(remote_url) = std::env::var("LIBSQL_REMOTE_URL") else {
+        eprintln!("skipping remote stress smoke; LIBSQL_REMOTE_URL is not set");
+        return;
+    };
+    let auth_token = std::env::var("LIBSQL_AUTH_TOKEN").unwrap_or_default();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("error")
+        .with_test_writer()
+        .try_init();
+
+    let config = StressTestConfig {
+        max_concurrent: 2,
+        duration_secs: 1,
+        tasks_per_instance: 2,
+        activity_delay_ms: 5,
+        orch_concurrency: 1,
+        worker_concurrency: 1,
+        wait_timeout_secs: 60,
+    };
+
+    let factory = RemoteLibsqlFactory {
+        config: LibsqlDatabaseConfig::Remote {
+            url: remote_url,
+            auth_token,
+        },
+    };
+    let result = run_parallel_orchestrations_test_with_config(&factory, config)
+        .await
+        .expect("remote parallel orchestration stress smoke failed");
+
+    assert_eq!(result.failed, 0, "remote stress failures: {result:?}");
+    assert!(
+        result.success_rate() >= 100.0,
+        "remote success rate was {:.2}%",
+        result.success_rate()
+    );
+}

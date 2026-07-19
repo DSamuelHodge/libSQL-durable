@@ -3,8 +3,28 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use duroxide::provider_validations::ProviderFactory;
-use duroxide::provider_validations::test_multi_operation_atomic_ack;
+use duroxide::provider_validations::bulk_deletion::test_delete_instance_bulk_safety_and_limits;
+use duroxide::provider_validations::capability_filtering::test_fetch_with_compatible_filter_returns_item;
+use duroxide::provider_validations::prune::test_prune_safety;
+use duroxide::provider_validations::sessions::test_session_affinity_same_worker;
+use duroxide::provider_validations::tag_filtering::test_tag_round_trip_preservation;
+use duroxide::provider_validations::{
+    ProviderFactory, test_abandon_releases_lock_immediately, test_abandon_work_item_releases_lock,
+    test_ack_work_item_none_deletes_without_enqueue,
+    test_cancelled_activities_deleted_from_worker_queue,
+    test_continue_as_new_creates_new_execution, test_exclusive_instance_lock,
+    test_execution_history_persistence, test_execution_id_sequencing, test_execution_isolation,
+    test_get_execution_info, test_get_instance_info, test_get_instance_stats_history,
+    test_get_instance_stats_kv, test_get_instance_stats_nonexistent, test_get_queue_depths,
+    test_get_system_metrics, test_instance_creation_via_metadata, test_latest_execution_detection,
+    test_list_executions, test_list_instances, test_list_instances_by_status,
+    test_lock_expires_after_timeout, test_lock_renewal_on_ack, test_lost_lock_token_handling,
+    test_multi_operation_atomic_ack, test_no_instance_creation_on_enqueue,
+    test_null_version_handling, test_sub_orchestration_instance_creation,
+    test_timer_delayed_visibility, test_worker_ack_atomicity,
+    test_worker_item_immediate_visibility, test_worker_lock_renewal_success,
+    test_worker_peek_lock_semantics,
+};
 use duroxide::providers::{Provider, TagFilter, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
 use libsql::params;
@@ -66,6 +86,68 @@ fn started_event(instance: &str) -> Event {
 async fn native_multi_operation_atomic_ack_validation() {
     let factory = NativeLibsqlTestFactory;
     test_multi_operation_atomic_ack(&factory).await;
+}
+
+#[tokio::test]
+async fn native_provider_core_validations() {
+    let factory = NativeLibsqlTestFactory;
+
+    test_instance_creation_via_metadata(&factory).await;
+    test_exclusive_instance_lock(&factory).await;
+    test_multi_operation_atomic_ack(&factory).await;
+    test_worker_peek_lock_semantics(&factory).await;
+    test_timer_delayed_visibility(&factory).await;
+    test_list_instances(&factory).await;
+}
+
+#[tokio::test]
+async fn native_provider_management_validations() {
+    let factory = NativeLibsqlTestFactory;
+
+    test_list_instances_by_status(&factory).await;
+    test_list_executions(&factory).await;
+    test_get_instance_info(&factory).await;
+    test_get_execution_info(&factory).await;
+    test_get_system_metrics(&factory).await;
+    test_get_queue_depths(&factory).await;
+}
+
+#[tokio::test]
+async fn native_provider_extended_contract_validations() {
+    let factory = NativeLibsqlTestFactory;
+
+    test_fetch_with_compatible_filter_returns_item(&factory).await;
+    test_tag_round_trip_preservation(&factory).await;
+    test_session_affinity_same_worker(&factory).await;
+    test_prune_safety(&factory).await;
+    test_delete_instance_bulk_safety_and_limits(&factory).await;
+}
+
+#[tokio::test]
+async fn native_provider_additional_contract_validations() {
+    let factory = NativeLibsqlTestFactory;
+
+    test_no_instance_creation_on_enqueue(&factory).await;
+    test_null_version_handling(&factory).await;
+    test_sub_orchestration_instance_creation(&factory).await;
+    test_worker_ack_atomicity(&factory).await;
+    test_lost_lock_token_handling(&factory).await;
+    test_worker_item_immediate_visibility(&factory).await;
+    test_lock_expires_after_timeout(&factory).await;
+    test_abandon_releases_lock_immediately(&factory).await;
+    test_abandon_work_item_releases_lock(&factory).await;
+    test_lock_renewal_on_ack(&factory).await;
+    test_worker_lock_renewal_success(&factory).await;
+    test_execution_isolation(&factory).await;
+    test_latest_execution_detection(&factory).await;
+    test_execution_id_sequencing(&factory).await;
+    test_continue_as_new_creates_new_execution(&factory).await;
+    test_execution_history_persistence(&factory).await;
+    test_ack_work_item_none_deletes_without_enqueue(&factory).await;
+    test_cancelled_activities_deleted_from_worker_queue(&factory).await;
+    test_get_instance_stats_nonexistent(&factory).await;
+    test_get_instance_stats_history(&factory).await;
+    test_get_instance_stats_kv(&factory).await;
 }
 
 #[tokio::test]
@@ -290,4 +372,142 @@ async fn native_custom_status_kv_and_session_helpers() {
         .await
         .expect("cleanup failed");
     assert_eq!(cleaned, 1);
+}
+
+#[tokio::test]
+async fn native_schema_version_bootstrap_is_idempotent() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("schema-version.db");
+
+    let first = LibsqlProvider::new(LibsqlDatabaseConfig::Local { path: path.clone() })
+        .await
+        .expect("first provider creation failed");
+    drop(first);
+
+    let second = LibsqlProvider::new(LibsqlDatabaseConfig::Local { path })
+        .await
+        .expect("second provider creation failed");
+    let conn = second
+        .native()
+        .expect("expected native provider")
+        .connect()
+        .await
+        .expect("connect failed");
+    let mut rows = conn
+        .query(
+            "SELECT version, description FROM libsql_durable_schema_versions ORDER BY version",
+            (),
+        )
+        .await
+        .expect("schema version query failed");
+    let row = rows
+        .next()
+        .await
+        .expect("schema version row read failed")
+        .expect("expected schema version row");
+    assert_eq!(row.get::<i64>(0).expect("version"), 1);
+    assert_eq!(
+        row.get::<String>(1).expect("description"),
+        "initial libsql-durable native schema"
+    );
+    assert!(
+        rows.next()
+            .await
+            .expect("second schema version row read failed")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn native_remote_validation_subset_when_configured() {
+    let Ok(remote_url) = std::env::var("LIBSQL_REMOTE_URL") else {
+        eprintln!("skipping remote native validation; LIBSQL_REMOTE_URL is not set");
+        return;
+    };
+    let auth_token = std::env::var("LIBSQL_AUTH_TOKEN").unwrap_or_default();
+    let provider = LibsqlProvider::new(LibsqlDatabaseConfig::Remote {
+        url: remote_url,
+        auth_token,
+    })
+    .await
+    .expect("failed to create remote native provider");
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after UNIX epoch")
+        .as_nanos();
+    let instance = format!("remote-validation-{suffix}");
+
+    provider
+        .enqueue_for_orchestrator(
+            WorkItem::StartOrchestration {
+                instance: instance.clone(),
+                orchestration: "RemoteValidation".to_string(),
+                input: "{}".to_string(),
+                version: Some("1.0.0".to_string()),
+                parent_instance: None,
+                parent_id: None,
+                execution_id: INITIAL_EXECUTION_ID,
+            },
+            None,
+        )
+        .await
+        .expect("remote enqueue failed");
+    let (_item, lock_token, _attempts) = provider
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
+        .await
+        .expect("remote fetch failed")
+        .expect("expected remote orchestration item");
+    provider
+        .ack_orchestration_item(
+            &lock_token,
+            INITIAL_EXECUTION_ID,
+            vec![started_event(&instance)],
+            vec![],
+            vec![],
+            duroxide::providers::ExecutionMetadata {
+                orchestration_name: Some("RemoteValidation".to_string()),
+                orchestration_version: Some("1.0.0".to_string()),
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .expect("remote ack failed");
+    assert_eq!(
+        provider
+            .read(&instance)
+            .await
+            .expect("remote read failed")
+            .len(),
+        1
+    );
+
+    let worker = WorkItem::ActivityExecute {
+        instance,
+        execution_id: INITIAL_EXECUTION_ID,
+        id: 1,
+        name: "RemoteWork".to_string(),
+        input: "{}".to_string(),
+        session_id: None,
+        tag: None,
+    };
+    provider
+        .enqueue_for_worker(worker.clone())
+        .await
+        .expect("remote worker enqueue failed");
+    let (fetched, token, _) = provider
+        .fetch_work_item(
+            Duration::from_secs(30),
+            Duration::ZERO,
+            None,
+            &TagFilter::default_only(),
+        )
+        .await
+        .expect("remote worker fetch failed")
+        .expect("expected remote worker item");
+    assert_eq!(fetched, worker);
+    provider
+        .ack_work_item(&token, None)
+        .await
+        .expect("remote worker ack failed");
 }

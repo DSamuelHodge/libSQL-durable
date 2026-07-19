@@ -22,7 +22,8 @@ The provider has two mutually exclusive backend features:
 - `native-libsql`: real `libsql` SDK construction and schema setup for embedded
   local files, self-hosted remote `sqld`/`libsql-server`, and optional
   remote-replica topology. The local native provider now covers Duroxide's core
-  runtime contract, including orchestration ack as one explicit transaction.
+  runtime and management contracts, including orchestration ack as one explicit
+  transaction.
 
 These features cannot be enabled together because `libsql-ffi` and SQLx's
 bundled SQLite both export SQLite C symbols in one binary.
@@ -38,6 +39,7 @@ The code is split as:
 
 ```sh
 cargo test --test libsql_provider_validations
+cargo test --no-default-features --features native-libsql --test native_libsql_provider
 ```
 
 ## Local Stress Smoke
@@ -49,6 +51,12 @@ LIBSQL_DATABASE_URL=file:./stress-libsql.db \
 
 The stress tests use Duroxide's reusable provider stress harness and require a
 100% success rate.
+
+Native mode can be stress-tested without SQLx in the normal dependency graph:
+
+```sh
+cargo test --no-default-features --features native-libsql --test libsql_provider_stress -- --nocapture
+```
 
 ## Local Embedded Usage
 
@@ -108,6 +116,21 @@ LIBSQL_REPLICA_PATH=./replica.db
 LIBSQL_AUTH_TOKEN=
 ```
 
+Remote validation is optional and env-gated, so ordinary `cargo test` runs do
+not require Docker or a running `sqld`. Before claiming a self-hosted remote or
+replica configuration is production-ready, run the remote validation subset and
+remote stress smoke against the target server:
+
+```sh
+LIBSQL_REMOTE_URL=http://127.0.0.1:8080 LIBSQL_AUTH_TOKEN= \
+  cargo test --no-default-features --features native-libsql \
+  --test native_libsql_provider native_remote_validation_subset_when_configured -- --nocapture
+
+LIBSQL_REMOTE_URL=http://127.0.0.1:8080 LIBSQL_AUTH_TOKEN= \
+  cargo test --no-default-features --features native-libsql \
+  --test libsql_provider_stress libsql_remote_parallel_orchestrations_stress_smoke_when_configured -- --nocapture
+```
+
 ## Native Build Check
 
 ```sh
@@ -118,7 +141,8 @@ cargo tree --no-default-features --features native-libsql --edges normal -i sqlx
 ```
 
 The `cargo tree` command should report that `sqlx` does not match any packages,
-confirming the native normal dependency graph does not include SQLx.
+confirming the native normal dependency graph does not include SQLx. Cargo exits
+with a non-zero status for that "no matching package" result.
 Dev-dependencies still use Duroxide's SQLite-backed provider validation/stress
 tooling.
 
@@ -141,8 +165,11 @@ build output.
 
 ## Native libSQL Port Status
 
-Port `duroxide::providers::sqlite::SqliteProvider` query-by-query from `sqlx`
-to `libsql::{Connection, Transaction}` while preserving the tests added here.
+The native backend is schema version `1`. Startup creates
+`libsql_durable_schema_versions`, applies the current schema idempotently,
+records version `1`, and rejects databases stamped with a newer unsupported
+version.
+
 The local native provider has coverage for:
 
 - `read`
@@ -164,22 +191,43 @@ The local native provider has coverage for:
 - `get_kv_value`
 - `get_kv_all_values`
 - `get_instance_stats`
+- `as_management_capability`
+- `list_instances`
+- `list_instances_by_status`
+- `list_executions`
+- `read_history_with_execution_id`
+- `read_history`
+- `latest_execution_id`
+- `get_instance_info`
+- `get_execution_info`
+- `get_system_metrics`
+- `get_queue_depths`
+- `list_children`
+- `get_parent_id`
+- `delete_instances_atomic`
+- `delete_instance_bulk`
+- `prune_executions`
+- `prune_executions_bulk`
 
 The native local acceptance gate currently passes:
 
 - `test_multi_operation_atomic_ack`
+- native core, management, extended, and additional Duroxide provider
+  validations
+- native schema version idempotency validation
 - local parallel orchestration stress smoke with `failed == 0`
 - local large-payload stress smoke with `failed == 0`
 - native normal dependency graph excludes SQLx
 
 Remaining work before calling the crate self-hosted remote-ready:
 
-- Native `ProviderAdmin`/management helpers for the full provider validation
-  surface.
-- Self-hosted `sqld`/`libsql-server` bootstrap and migrations using
-  `LIBSQL_REMOTE_URL`.
-- Provider validation subset against self-hosted `sqld`.
-- Stress smoke against self-hosted `sqld` with `failed == 0`.
+- Run the env-gated provider validation subset against self-hosted
+  `sqld`/`libsql-server` using `LIBSQL_REMOTE_URL`.
+- Run the env-gated stress smoke against self-hosted `sqld` with `failed == 0`.
 - Optional primary/replica `sqld` durability checks.
 - Remote tuning only if local native remains green and self-hosted remote runs
   show transient network or lock-timing behavior.
+
+Intentionally out of scope for this provider hardening wave: runtime facade,
+workflow DSL, agent event model, vector memory, WASM tools, and Turso-native
+copy-on-write branching.
