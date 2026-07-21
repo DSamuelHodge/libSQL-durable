@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | Multi-tenant isolation | **Namespace or per-tenant DB** | Recipe 6 |
 | Workflows + embeddings in one store | **SQL escape hatch + vectors** | Recipe 7 |
 | Full agent harness on one runtime/DB | **AgentLoop orchestration** | Recipe 10 |
+| One binary host + day-2 ops | **`pvm` CLI** | Recipe 11 |
+| Process logic as data (not only binary) | **`pvm.def.v1` interpreter** | Recipe 12 |
+| Speculative subagent / explore | **World fork → discard or promote** | Recipe 13 |
 
 ---
 
@@ -627,6 +630,144 @@ Exact runtime registration APIs live in Duroxide docs; this crate supplies the d
 
 ---
 
+## Recipe 11 — One binary host (`pvm`)
+
+**When:** You want a disposable host CPU for a world file without writing app glue.
+
+**Docs:** [`docs/RUNTIME.md`](./docs/RUNTIME.md) · [`docs/SYSCALLS.md`](./docs/SYSCALLS.md)
+
+```sh
+# Inspect
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  status --world ./world.db
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  health --world ./world.db
+
+# Stock Echo process (short-lived host)
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  start --world ./world.db "hello"
+
+# Long-lived host (Ctrl-C to stop)
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  run --world ./world.db --heal-on-start
+```
+
+**Stock surface:** process `Echo`; syscalls `echo`, `sleep_ms`.  
+**Kernel stays thin:** tool/LLM handlers belong in *your* binary, not the crate.
+
+---
+
+## Recipe 12 — Process definitions as data (`pvm.def.v1`)
+
+**When:** You want to change control flow by writing versioned JSON in the world,
+not only by shipping a new host binary. Activities (syscalls) stay host-supplied.
+
+**Docs:** [`docs/DEFINITIONS.md`](./docs/DEFINITIONS.md)
+
+```json
+{
+  "schema": "pvm.def.v1",
+  "entry": "main",
+  "steps": [
+    { "id": "main", "op": "activity", "name": "echo", "input": "$input", "out": "r", "next": "done" },
+    { "id": "done", "op": "return", "value": "$r" }
+  ]
+}
+```
+
+```sh
+# Store definition (versions are immutable unless --force)
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  def-put --world ./world.db Demo 1.0.0 ./demo.json
+
+# Run interpreter (same binary, data-driven control flow)
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  interpret --world ./world.db Demo@1.0.0 "hello"
+```
+
+**Rust:**
+
+```rust
+use libsql_durable::{
+    interpreted_orchestrations, wrap_interpret_input, INTERPRETED_ORCH_NAME,
+};
+
+// Register interpreted_orchestrations() + your ActivityRegistry on Runtime.
+// payload = wrap_interpret_input(&body_json, "input")?;
+// client.start_orchestration(id, INTERPRETED_ORCH_NAME, payload).await?;
+```
+
+**Exit test:** two definition versions, **same host binary**, different behavior.
+
+---
+
+## Recipe 13 — Subagent explore = world fork (discard or promote)
+
+**When:** Speculative work must not poison the primary world.  
+**Idea:** subagent explore is a **world-grain subprocess**, not a side chat.
+
+**Docs:** [`docs/FORK.md`](./docs/FORK.md)
+
+```text
+parent.db  ──fork explore──►  child.db
+                               │
+                    alternate syscalls
+                               │
+              ┌────────────────┴────────────────┐
+              ▼                                 ▼
+     discard_world_package              promote_world_package
+     (parent untouched)                 (confirm + backup + replace)
+```
+
+### Runnable demo
+
+```sh
+# Discard path (default)
+cargo run --example explore_fork --no-default-features --features native-libsql
+
+# Promote path (parent backed up, then replaced by child)
+PVM_EXPLORE_MODE=promote cargo run --example explore_fork --no-default-features --features native-libsql
+```
+
+### Library sketch
+
+```rust
+use libsql_durable::{
+    discard_world_package, promote_world_package, ForkOptions, PromoteOptions,
+};
+
+// Explore
+let (fork, child) = parent
+    .fork_and_open(&parent_path, &child_path, ForkOptions::explore())
+    .await?;
+
+// ... run alternate work on `child` ...
+
+// A) discard
+discard_world_package(&child_path)?;
+
+// B) promote (explicit)
+// promote_world_package(
+//     &parent_path,
+//     &child_path,
+//     PromoteOptions::confirmed().with_discard_child(true),
+// ).await?;
+```
+
+### CLI promote
+
+```sh
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  promote --parent ./parent.db --child ./child.db --confirm --discard-child
+```
+
+**Guards:** `--confirm` required; child must declare `parent_world_id` of parent;  
+parent package copied to `*.promote-bak-<ts>` before replace; `world_promote_audit` on success.
+
+**Not in v1:** selective merge of events/KV into a live parent (policy B).
+
+---
+
 ## Anti-patterns
 
 | Avoid | Prefer |
@@ -636,18 +777,23 @@ Exact runtime registration APIs live in Duroxide docs; this crate supplies the d
 | Non-idempotent activities with aggressive retries | Idempotent keys / dedupe |
 | Forgetting encryption key backup | KMS + documented recovery |
 | Enabling `compat-sqlite` and `native-libsql` together | One feature only (C symbol clash) |
+| Side-chat “subagents” outside the journal | Child process **or** forked world (Recipe 13) |
+| Shipping process graphs only in binary forever | Definitions + interpreter (Recipe 12) when portable |
 
 ---
 
 ## Where to go next
 
-1. Pick **one** recipe (usually 1 → 2, or **10** if you are building agents).
-2. Run `examples/agent_loop` to feel the full harness on one file.
-3. Add admin retention (Recipe 8) once you have real volume.
-4. Layer encryption / replica / offline only when the deploy topology needs it.
+1. Pick **one** recipe (usually 1 → 11, or **10** if you are building agents).
+2. Run `examples/agent_loop` (Recipe 10) or `examples/explore_fork` (Recipe 13).
+3. Use `pvm` for day-2 ops (Recipe 11) and definitions (Recipe 12).
+4. Add admin retention (Recipe 8) once you have real volume.
+5. Layer encryption / replica / offline only when the deploy topology needs it.
 
-Runnable examples in this repo:
+Runnable examples / host in this repo:
 
-| Example | Command |
+| Example / bin | Command |
 |---|---|
 | Agent loop (Recipe 10) | `cargo run --example agent_loop --no-default-features --features native-libsql` |
+| Explore fork discard/promote (Recipe 13) | `cargo run --example explore_fork --no-default-features --features native-libsql` |
+| `pvm` host (Recipe 11) | `cargo run --bin pvm --no-default-features --features native-libsql -- --help` |

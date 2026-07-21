@@ -374,12 +374,20 @@ Always: `cargo test --no-default-features --features native-libsql …`
 
 ---
 
-## Immediate next step
+## Status (shipped)
 
-Implement **PR1** (binary + ops) first — unlocks the gut test path and gives a place for PR2/PR5/PR6 to land without more example-only wiring.
+| Wave | PRs | Status |
+|---|---|---|
+| Wave 1 Host | PR1–PR2 | **Shipped** (`pvm` + stock syscalls) |
+| Wave 2 Program is data | PR3–PR5 | **Shipped** (immutable defs + `pvm.def.v1` + interpreter) |
+| Wave 3 Explore is a world | PR6–PR7 | **Shipped** (explore presets + example) |
+| Wave 4 Resolve | PR8 | **Shipped** (`promote_world_package`) |
+| Quality gate | — | **Shipped** (clippy `-D warnings` + `collapse_quality`) |
+| Operability | Cookbook 11–13 | **Shipped** (docs + dual-mode `explore_fork`) |
 
 ---
 
 ## One-line summary
 
-**Finish the collapse by shipping a `pvm` host binary, a `pvm.def.v1` interpreter bound to world-stored definitions, fork-first explore with discard/promote, and a strict host-only syscall pack — while the world file remains the durable computer.**
+**Finish the collapse by shipping a `pvm` host binary, a `pvm.def.v1` interpreter bound to world-stored definitions, fork-first explore with discard/promote, and a strict host-only syscall pack — while the world file remains the durable computer.**  
+**Done on `main`.**

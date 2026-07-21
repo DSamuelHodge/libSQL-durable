@@ -15,32 +15,25 @@ multi-tenant, day-2 ops, durable process demos).
 
 **Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
 Durable process kernel (world + journal + syscalls), not only a storage adapter.  
-**PVM v1 (0–3) + horizon (4–7) complete** (`SCHEMA_VERSION` = 2):  
-[World packaging](./docs/WORLD_PACKAGE.md) · [Introspection](./docs/INTROSPECTION.md) · [Healing](./docs/HEALING.md) · [Definitions](./docs/DEFINITIONS.md) · [Fork](./docs/FORK.md) · [Policy](./docs/POLICY.md) · [Mesh](./docs/MESH.md) · [PVM spec](./docs/PVM.md)
+**PVM kernel (0–7) + collapse finish line complete** (`SCHEMA_VERSION` = 2):  
+[World](./docs/WORLD_PACKAGE.md) · [Introspection](./docs/INTROSPECTION.md) · [Healing](./docs/HEALING.md) · [Definitions](./docs/DEFINITIONS.md) · [Fork / promote](./docs/FORK.md) · [Policy](./docs/POLICY.md) · [Mesh](./docs/MESH.md) · [Runtime](./docs/RUNTIME.md) · [PVM](./docs/PVM.md) · [Collapse plan](./docs/COLLAPSE_PR_PLAN.md)
 
-**One-binary host (`pvm`):** open a world file, inspect/heal, or run stock syscalls — see [`docs/RUNTIME.md`](./docs/RUNTIME.md).  
-**Collapse finish line:** [`docs/COLLAPSE_PR_PLAN.md`](./docs/COLLAPSE_PR_PLAN.md).
+**One-binary host (`pvm`)** — open a world, inspect/heal, run stock or interpreted processes:
 
 ```sh
-# Ops (no long-lived worker needed)
-cargo run --bin pvm --no-default-features --features native-libsql -- \
-  health --world ./world.db
-
-# Stock Echo process (short-lived host)
-cargo run --bin pvm --no-default-features --features native-libsql -- \
-  start --world ./world.db "hello"
-
-# Long-lived host until Ctrl-C
-cargo run --bin pvm --no-default-features --features native-libsql -- \
-  run --world ./world.db
+cargo run --bin pvm --no-default-features --features native-libsql -- health --world ./world.db
+cargo run --bin pvm --no-default-features --features native-libsql -- start --world ./world.db "hello"
+cargo run --bin pvm --no-default-features --features native-libsql -- run --world ./world.db
 ```
 
-**Runnable process demos:**
+**Demos:**
 
 ```sh
+# Agent = process on one world file
 cargo run --example agent_loop --no-default-features --features native-libsql
-# real model syscalls (needs NVIDIA_API_KEY):
-# cargo run --example agent_nvidia --no-default-features --features native-libsql
+
+# Subagent explore = world fork (discard default; promote with PVM_EXPLORE_MODE=promote)
+cargo run --example explore_fork --no-default-features --features native-libsql
 ```
 
 ## Prerequisites
