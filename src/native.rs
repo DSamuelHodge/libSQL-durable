@@ -2,36 +2,199 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use duroxide::providers::{
-    DispatcherCapabilityFilter, ExecutionMetadata, KvEntry, OrchestrationItem, Provider,
-    ProviderAdmin, ProviderError, ScheduledActivityIdentifier, SessionFetchConfig, TagFilter,
-    WorkItem,
+    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
+    InstanceFilter, InstanceInfo, KvEntry, OrchestrationItem, Provider, ProviderAdmin,
+    ProviderError, PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier,
+    SessionFetchConfig, SystemMetrics, TagFilter, WorkItem,
 };
 use duroxide::{Event, EventKind, SystemStats};
 use libsql::{Value, params};
 
-use crate::{LibsqlDatabaseConfig, LibsqlProviderInitError};
+use crate::{
+    LibsqlDatabaseConfig, LibsqlDatabaseMode, LibsqlEngineOptions, LibsqlProviderInitError,
+};
+
+/// Connection/retry tuning for local files and remote `sqld` endpoints.
+///
+/// Defaults are conservative for embedded local use. Remote constructors and
+/// `ProviderTuning::from_env()` raise busy-timeout and transient retries to
+/// absorb HTTP/Hrana lock timing under concurrent load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderTuning {
+    /// SQLite `PRAGMA busy_timeout` applied on every new connection (ms).
+    pub busy_timeout_ms: u64,
+    /// How many times to retry clearly transient provider errors.
+    pub max_transient_retries: u32,
+    /// Base backoff delay for transient retries (doubles each attempt).
+    pub retry_base_delay_ms: u64,
+}
+
+impl Default for ProviderTuning {
+    fn default() -> Self {
+        Self {
+            busy_timeout_ms: 2_000,
+            max_transient_retries: 2,
+            retry_base_delay_ms: 15,
+        }
+    }
+}
+
+impl ProviderTuning {
+    /// Defaults tuned for self-hosted remote / multi-node `sqld`.
+    pub fn remote_defaults() -> Self {
+        Self {
+            busy_timeout_ms: 5_000,
+            max_transient_retries: 4,
+            retry_base_delay_ms: 25,
+        }
+    }
+
+    /// Build tuning from environment, preferring remote defaults when
+    /// `LIBSQL_REMOTE_URL` is set.
+    ///
+    /// | Variable | Meaning |
+    /// |---|---|
+    /// | `LIBSQL_BUSY_TIMEOUT_MS` | `PRAGMA busy_timeout` |
+    /// | `LIBSQL_TRANSIENT_RETRIES` | max transient retries |
+    /// | `LIBSQL_RETRY_BASE_DELAY_MS` | base backoff delay |
+    pub fn from_env() -> Self {
+        let mut tuning = if std::env::var_os("LIBSQL_REMOTE_URL").is_some() {
+            Self::remote_defaults()
+        } else {
+            Self::default()
+        };
+        if let Ok(v) = std::env::var("LIBSQL_BUSY_TIMEOUT_MS") {
+            if let Ok(ms) = v.parse() {
+                tuning.busy_timeout_ms = ms;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBSQL_TRANSIENT_RETRIES") {
+            if let Ok(n) = v.parse() {
+                tuning.max_transient_retries = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LIBSQL_RETRY_BASE_DELAY_MS") {
+            if let Ok(ms) = v.parse() {
+                tuning.retry_base_delay_ms = ms;
+            }
+        }
+        tuning
+    }
+}
 
 pub struct NativeLibsqlProvider {
     db: libsql::Database,
+    tuning: ProviderTuning,
+    engine_options: LibsqlEngineOptions,
 }
 
 impl NativeLibsqlProvider {
     pub async fn new(config: LibsqlDatabaseConfig) -> Result<Self, LibsqlProviderInitError> {
-        match config {
-            LibsqlDatabaseConfig::InMemory => Self::new_local(":memory:").await,
-            LibsqlDatabaseConfig::Local { path } => Self::new_local(path).await,
-            LibsqlDatabaseConfig::Remote { url, auth_token } => {
-                Self::new_remote(url, auth_token).await
+        let LibsqlDatabaseConfig { mode, options } = config;
+        let tuning = match &mode {
+            LibsqlDatabaseMode::InMemory | LibsqlDatabaseMode::Local { .. } => {
+                ProviderTuning::from_env()
             }
-            LibsqlDatabaseConfig::RemoteReplica {
+            LibsqlDatabaseMode::Remote { .. }
+            | LibsqlDatabaseMode::RemoteReplica { .. }
+            | LibsqlDatabaseMode::OfflineSynced { .. } => {
+                // Prefer remote defaults, then allow env overrides.
+                let mut tuning = ProviderTuning::remote_defaults();
+                let from_env = ProviderTuning::from_env();
+                // from_env already prefers remote defaults when LIBSQL_REMOTE_URL is set.
+                if std::env::var_os("LIBSQL_REMOTE_URL").is_some() {
+                    tuning = from_env;
+                } else {
+                    // Keep remote defaults but honor explicit env knobs if present.
+                    if std::env::var_os("LIBSQL_BUSY_TIMEOUT_MS").is_some()
+                        || std::env::var_os("LIBSQL_TRANSIENT_RETRIES").is_some()
+                        || std::env::var_os("LIBSQL_RETRY_BASE_DELAY_MS").is_some()
+                    {
+                        tuning = from_env;
+                    }
+                }
+                tuning
+            }
+        };
+
+        match mode {
+            LibsqlDatabaseMode::InMemory => {
+                Self::open_local(":memory:", options, tuning).await
+            }
+            LibsqlDatabaseMode::Local { path } => Self::open_local(path, options, tuning).await,
+            LibsqlDatabaseMode::Remote { url, auth_token } => {
+                Self::open_remote(url, auth_token, options, tuning).await
+            }
+            LibsqlDatabaseMode::RemoteReplica {
                 local_path,
                 remote_url,
                 auth_token,
-            } => Self::new_remote_replica(local_path, remote_url, auth_token).await,
+            } => Self::open_remote_replica(local_path, remote_url, auth_token, options, tuning).await,
+            LibsqlDatabaseMode::OfflineSynced {
+                local_path,
+                remote_url,
+                auth_token,
+            } => Self::open_offline_synced(local_path, remote_url, auth_token, options, tuning).await,
         }
     }
 
     pub async fn new_local(path: impl Into<PathBuf>) -> Result<Self, LibsqlProviderInitError> {
+        Self::open_local(
+            path,
+            LibsqlEngineOptions::default(),
+            ProviderTuning::default(),
+        )
+        .await
+    }
+
+    pub async fn new_remote(
+        url: String,
+        auth_token: String,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        Self::open_remote(
+            url,
+            auth_token,
+            LibsqlEngineOptions::default(),
+            ProviderTuning::remote_defaults(),
+        )
+        .await
+    }
+
+    pub async fn new_remote_replica(
+        local_path: impl Into<PathBuf>,
+        remote_url: String,
+        auth_token: String,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        Self::open_remote_replica(
+            local_path,
+            remote_url,
+            auth_token,
+            LibsqlEngineOptions::default(),
+            ProviderTuning::remote_defaults(),
+        )
+        .await
+    }
+
+    pub async fn new_offline_synced(
+        local_path: impl Into<PathBuf>,
+        remote_url: String,
+        auth_token: String,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        Self::open_offline_synced(
+            local_path,
+            remote_url,
+            auth_token,
+            LibsqlEngineOptions::default(),
+            ProviderTuning::remote_defaults(),
+        )
+        .await
+    }
+
+    async fn open_local(
+        path: impl Into<PathBuf>,
+        options: LibsqlEngineOptions,
+        tuning: ProviderTuning,
+    ) -> Result<Self, LibsqlProviderInitError> {
         let path = path.into();
         if path.as_os_str() != ":memory:" {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -43,26 +206,49 @@ impl NativeLibsqlProvider {
             }
         }
 
-        let db = libsql::Builder::new_local(path).build().await?;
-        let provider = Self { db };
+        let mut builder = libsql::Builder::new_local(path);
+        if let Some(key) = &options.local_encryption_key {
+            builder = builder.encryption_config(Self::local_encryption_config(key)?);
+        }
+        let db = builder.build().await?;
+        let provider = Self {
+            db,
+            tuning,
+            engine_options: options,
+        };
         provider.create_schema().await?;
         Ok(provider)
     }
 
-    pub async fn new_remote(
+    async fn open_remote(
         url: String,
         auth_token: String,
+        options: LibsqlEngineOptions,
+        tuning: ProviderTuning,
     ) -> Result<Self, LibsqlProviderInitError> {
-        let db = libsql::Builder::new_remote(url, auth_token).build().await?;
-        let provider = Self { db };
+        let mut builder = libsql::Builder::new_remote(url, auth_token);
+        if let Some(namespace) = &options.namespace {
+            builder = builder.namespace(namespace.clone());
+        }
+        if let Some(key) = &options.remote_encryption_key_b64 {
+            builder = builder.remote_encryption(Self::remote_encryption_context(key));
+        }
+        let db = builder.build().await?;
+        let provider = Self {
+            db,
+            tuning,
+            engine_options: options,
+        };
         provider.create_schema().await?;
         Ok(provider)
     }
 
-    pub async fn new_remote_replica(
+    async fn open_remote_replica(
         local_path: impl Into<PathBuf>,
         remote_url: String,
         auth_token: String,
+        options: LibsqlEngineOptions,
+        tuning: ProviderTuning,
     ) -> Result<Self, LibsqlProviderInitError> {
         let local_path = local_path.into();
         if let Some(parent) = local_path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -73,49 +259,424 @@ impl NativeLibsqlProvider {
             })?;
         }
 
-        let db = libsql::Builder::new_remote_replica(local_path, remote_url, auth_token)
-            .build()
-            .await?;
-        let provider = Self { db };
+        // Embedded replicas need a clean file or a previously synced DB. Sync
+        // from the primary before applying DDL so we don't invent a divergent
+        // local schema ahead of the first replication handshake.
+        let mut builder = libsql::Builder::new_remote_replica(local_path, remote_url, auth_token)
+            .read_your_writes(options.read_your_writes);
+        if let Some(namespace) = &options.namespace {
+            builder = builder.namespace(namespace.clone());
+        }
+        if let Some(interval) = options.sync_interval {
+            builder = builder.sync_interval(interval);
+        }
+        if let Some(key) = &options.local_encryption_key {
+            builder = builder.encryption_config(Self::local_encryption_config(key)?);
+        }
+        if let Some(key) = &options.remote_encryption_key_b64 {
+            builder = builder.remote_encryption(Self::remote_encryption_context(key));
+        }
+        let db = builder.build().await?;
+        let provider = Self {
+            db,
+            tuning,
+            engine_options: options,
+        };
+        provider.sync().await?;
         provider.create_schema().await?;
+        provider.sync().await?;
         Ok(provider)
+    }
+
+    async fn open_offline_synced(
+        local_path: impl Into<PathBuf>,
+        remote_url: String,
+        auth_token: String,
+        options: LibsqlEngineOptions,
+        tuning: ProviderTuning,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        let local_path = local_path.into();
+        if let Some(parent) = local_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                libsql::Error::ConnectionFailed(format!(
+                    "failed to create offline-sync database directory: {e}"
+                ))
+            })?;
+        }
+
+        let mut builder = libsql::Builder::new_synced_database(local_path, remote_url, auth_token)
+            .read_your_writes(options.read_your_writes)
+            .remote_writes(options.remote_writes);
+        if let Some(interval) = options.sync_interval {
+            builder = builder.sync_interval(interval);
+        }
+        if let Some(key) = &options.remote_encryption_key_b64 {
+            builder = builder.remote_encryption(Self::remote_encryption_context(key));
+        }
+        let db = builder.build().await?;
+        let provider = Self {
+            db,
+            tuning,
+            engine_options: options,
+        };
+        // Initial pull/bootstrap then ensure durable schema exists.
+        let _ = provider.sync().await;
+        provider.create_schema().await?;
+        let _ = provider.sync().await;
+        Ok(provider)
+    }
+
+    fn local_encryption_config(
+        key: &[u8],
+    ) -> Result<libsql::EncryptionConfig, LibsqlProviderInitError> {
+        if key.is_empty() {
+            return Err(LibsqlProviderInitError::InvalidConfig(
+                "local encryption key must not be empty".into(),
+            ));
+        }
+        Ok(libsql::EncryptionConfig::new(
+            libsql::Cipher::Aes256Cbc,
+            bytes::Bytes::copy_from_slice(key),
+        ))
+    }
+
+    fn remote_encryption_context(key_b64: &str) -> libsql::EncryptionContext {
+        libsql::EncryptionContext {
+            key: libsql::EncryptionKey::Base64Encoded(key_b64.to_string()),
+        }
     }
 
     pub fn database(&self) -> &libsql::Database {
         &self.db
     }
 
+    pub fn tuning(&self) -> &ProviderTuning {
+        &self.tuning
+    }
+
+    pub fn engine_options(&self) -> &LibsqlEngineOptions {
+        &self.engine_options
+    }
+
+    /// Escape hatch: run arbitrary SQL (vectors, WASM UDFs, app tables, etc.).
+    pub async fn execute_sql(&self, sql: &str) -> Result<u64, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("execute_sql", e))?;
+        conn.execute(sql, ())
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("execute_sql", e))
+    }
+
+    /// Escape hatch: query arbitrary SQL as text rows.
+    pub async fn query_sql(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("query_sql", e))?;
+        let mut rows = conn
+            .query(sql, ())
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("query_sql", e))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("query_sql", e))?
+        {
+            let mut cells = Vec::new();
+            let cols = row.column_count().max(0) as i32;
+            for idx in 0..cols {
+                match row.get_value(idx) {
+                    Ok(Value::Null) => cells.push(None),
+                    Ok(Value::Text(s)) => cells.push(Some(s)),
+                    Ok(Value::Integer(i)) => cells.push(Some(i.to_string())),
+                    Ok(Value::Real(f)) => cells.push(Some(f.to_string())),
+                    Ok(Value::Blob(b)) => cells.push(Some(format!("\\x{}", Self::hex_encode(&b)))),
+                    Err(e) => {
+                        return Err(ProviderError::permanent(
+                            "query_sql",
+                            format!("Failed to read column {idx}: {e}"),
+                        ));
+                    }
+                }
+            }
+            out.push(cells);
+        }
+        Ok(out)
+    }
+
+    /// Returns true if native vector SQL functions appear available.
+    pub async fn engine_supports_vector(&self) -> Result<bool, ProviderError> {
+        // Probe a few known libSQL/Turso vector entry points; any success counts.
+        let probes = [
+            "SELECT vector32('[1.0, 0.0]')",
+            "SELECT vector('[1.0, 0.0]')",
+            "SELECT vector_distance_cos(vector32('[1,0]'), vector32('[1,0]'))",
+        ];
+        for sql in probes {
+            if self.query_sql(sql).await.is_ok() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Load a native SQLite/libSQL extension dylib (local engines).
+    pub async fn load_extension(
+        &self,
+        dylib_path: impl AsRef<std::path::Path>,
+        entry_point: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("load_extension", e))?;
+        conn.load_extension_enable()
+            .map_err(|e| Self::libsql_to_provider_error("load_extension", e))?;
+        let result = conn.load_extension(dylib_path.as_ref(), entry_point);
+        let _ = conn.load_extension_disable();
+        result.map_err(|e| Self::libsql_to_provider_error("load_extension", e))
+    }
+
+    /// Open a connection with remote-aware busy timeout applied when supported.
+    ///
+    /// Local SQLite applies the pragma via `query` (PRAGMA returns a row).
+    /// Self-hosted `sqld` over Hrana may reject it with "unsupported statement";
+    /// that is ignored so remote mode still works.
     pub async fn connect(&self) -> libsql::Result<libsql::Connection> {
-        self.db.connect()
+        let conn = self.db.connect()?;
+        if self.tuning.busy_timeout_ms > 0 {
+            // Use query: `PRAGMA busy_timeout = N` returns a row on local SQLite,
+            // and libsql's execute() errors with ExecuteReturnedRows.
+            match conn
+                .query(
+                    &format!("PRAGMA busy_timeout = {}", self.tuning.busy_timeout_ms),
+                    (),
+                )
+                .await
+            {
+                Ok(mut rows) => {
+                    // Drain optional result row.
+                    let _ = rows.next().await;
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    if !(msg.contains("unsupported statement")
+                        || msg.contains("unsupported")
+                        || msg.contains("not authorized")
+                        || msg.contains("ExecuteReturnedRows"))
+                    {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+        Ok(conn)
+    }
+
+    /// Retry a closure while the provider error is marked retryable.
+    pub async fn with_transient_retry<T, F, Fut>(
+        &self,
+        operation: &'static str,
+        mut f: F,
+    ) -> Result<T, ProviderError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ProviderError>>,
+    {
+        let mut attempt = 0u32;
+        loop {
+            match f().await {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if err.is_retryable() && attempt < self.tuning.max_transient_retries =>
+                {
+                    attempt += 1;
+                    let shift = (attempt - 1).min(4);
+                    let delay_ms = self
+                        .tuning
+                        .retry_base_delay_ms
+                        .saturating_mul(1u64 << shift);
+                    tracing::debug!(
+                        operation,
+                        attempt,
+                        delay_ms,
+                        error = %err,
+                        "retrying transient libsql provider error"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                Err(err) => {
+                    // Preserve original operation label when present.
+                    let _ = operation;
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Pull/push replication with the configured primary (no-op semantics for
+    /// pure local DBs that do not support sync — those return `Ok(None)`).
+    pub async fn sync(&self) -> Result<Option<u64>, LibsqlProviderInitError> {
+        match self.db.sync().await {
+            Ok(replicated) => Ok(replicated.frame_no()),
+            Err(err) => {
+                let msg = err.to_string();
+                // Local / pure-remote databases are not embedded replicas.
+                if msg.contains("not supported")
+                    || msg.contains("does not support")
+                    || msg.contains("no replicator")
+                    || msg.contains("sync is not")
+                {
+                    return Ok(None);
+                }
+                Err(err.into())
+            }
+        }
+    }
+
+    /// Current replication index when available (embedded replica only).
+    pub async fn replication_index(&self) -> Result<Option<u64>, LibsqlProviderInitError> {
+        match self.db.replication_index().await {
+            Ok(index) => Ok(index),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("not supported")
+                    || msg.contains("does not support")
+                    || msg.contains("no replicator")
+                {
+                    return Ok(None);
+                }
+                Err(err.into())
+            }
+        }
+    }
+
+    /// Apply durable-provider schema migrations idempotently.
+    ///
+    /// Safe to call on local files and self-hosted remote `sqld` endpoints.
+    /// Creates/updates tables and records [`SCHEMA_VERSION`] in `schema_meta`.
+    pub async fn migrate(&self) -> Result<(), LibsqlProviderInitError> {
+        self.create_schema().await?;
+        Ok(())
+    }
+
+    /// Return the applied schema version, if the meta table is present.
+    pub async fn schema_version(&self) -> Result<Option<i64>, LibsqlProviderInitError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT version FROM schema_meta WHERE id = 1",
+                (),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(row.get::<i64>(0)?)),
+            None => Ok(None),
+        }
     }
 
     async fn create_schema(&self) -> libsql::Result<()> {
-        let conn = self.db.connect()?;
+        let conn = self.connect().await?;
         for statement in SCHEMA_STATEMENTS {
             conn.execute(statement, ()).await?;
         }
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+            )
+            "#,
+            (),
+        )
+        .await?;
+        let now_ms = Self::now_millis();
+        conn.execute(
+            r#"
+            INSERT INTO schema_meta (id, version, applied_at_ms)
+            VALUES (1, ?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version,
+                applied_at_ms = excluded.applied_at_ms
+            "#,
+            params![SCHEMA_VERSION, now_ms],
+        )
+        .await?;
         Ok(())
     }
 
     fn libsql_to_provider_error(operation: &str, error: libsql::Error) -> ProviderError {
         let msg = error.to_string();
-        if msg.contains("database is locked")
-            || msg.contains("SQLITE_BUSY")
-            || msg.contains("timeout")
-            || msg.contains("connection")
-            || msg.contains("Hrana")
-        {
-            return ProviderError::retryable(operation, msg);
-        }
-
+        let lower = msg.to_ascii_lowercase();
+        // Classify permanent failures first: remote Hrana wrappers often embed the
+        // underlying SQLite constraint text inside a transport error string.
         if msg.contains("UNIQUE constraint")
             || msg.contains("PRIMARY KEY")
-            || msg.contains("constraint")
+            || msg.contains("FOREIGN KEY constraint")
+            || msg.contains("NOT NULL constraint")
+            || msg.contains("CHECK constraint")
+            || msg.contains("constraint failed")
+            || lower.contains("invalid lock token")
+            || lower.contains("no such table")
+            || lower.contains("syntax error")
         {
             return ProviderError::permanent(operation, msg);
         }
 
+        // Transient: locks, network, and Hrana transport flakiness common on
+        // multi-node / HTTP remotes under concurrent load.
+        if msg.contains("database is locked")
+            || msg.contains("SQLITE_BUSY")
+            || msg.contains("SQLITE_LOCKED")
+            || lower.contains("timeout")
+            || lower.contains("timed out")
+            || lower.contains("connection")
+            || lower.contains("broken pipe")
+            || lower.contains("connection reset")
+            || lower.contains("connection refused")
+            || lower.contains("temporarily unavailable")
+            || lower.contains("try again")
+            || lower.contains("stream closed")
+            || lower.contains("stream error")
+            || msg.contains("Hrana")
+            || lower.contains("http2")
+            || lower.contains("hyper::error")
+            || lower.contains("status code: 5")
+            || lower.contains("status: 5")
+        {
+            return ProviderError::retryable(operation, msg);
+        }
+
         ProviderError::retryable(operation, msg)
+    }
+
+    /// Delete runtime rows while keeping schema (test/admin helper for shared remote DBs).
+    pub async fn clear_runtime_data(&self) -> Result<(), ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("clear_runtime_data", e))?;
+        // Order matters for parent_instance_id FK on instances.
+        for statement in [
+            "DELETE FROM history",
+            "DELETE FROM executions",
+            "DELETE FROM orchestrator_queue",
+            "DELETE FROM worker_queue",
+            "DELETE FROM instance_locks",
+            "DELETE FROM kv_store",
+            "DELETE FROM kv_delta",
+            "DELETE FROM sessions",
+            "DELETE FROM instances",
+        ] {
+            conn.execute(statement, ())
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("clear_runtime_data", e))?;
+        }
+        Ok(())
     }
 
     fn now_millis() -> i64 {
@@ -141,6 +702,16 @@ impl NativeLibsqlProvider {
         value
             .map(|v| Value::Text(v.to_string()))
             .unwrap_or(Value::Null)
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0xf) as usize] as char);
+        }
+        out
     }
 
     fn option_i64(value: Option<i64>) -> Value {
@@ -358,7 +929,111 @@ impl NativeLibsqlProvider {
 
         Ok(values)
     }
+
+    fn placeholders(count: usize, start: usize) -> String {
+        (0..count)
+            .map(|i| format!("?{}", start + i))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn id_values(ids: &[String]) -> Vec<Value> {
+        ids.iter().cloned().map(Value::Text).collect()
+    }
+
+    fn coerce_timestamp(value: Value) -> u64 {
+        match value {
+            Value::Integer(v) => v.max(0) as u64,
+            Value::Real(v) => {
+                if v.is_finite() && v > 0.0 {
+                    v as u64
+                } else {
+                    0
+                }
+            }
+            Value::Text(s) => s.parse::<i64>().ok().map(|v| v.max(0) as u64).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    fn optional_text(value: Value) -> Option<String> {
+        match value {
+            Value::Text(s) => Some(s),
+            Value::Null => None,
+            _ => None,
+        }
+    }
+
+    async fn query_count(
+        conn: &libsql::Connection,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+        operation: &'static str,
+    ) -> Result<i64, ProviderError> {
+        let mut rows = conn
+            .query(sql, params)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?
+            .ok_or_else(|| {
+                ProviderError::permanent(operation, "Expected count row but got none")
+            })?;
+        row.get::<i64>(0)
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))
+    }
+
+    async fn query_count_tx(
+        tx: &libsql::Transaction,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+        operation: &'static str,
+    ) -> Result<i64, ProviderError> {
+        let mut rows = tx
+            .query(sql, params)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?
+            .ok_or_else(|| {
+                ProviderError::permanent(operation, "Expected count row but got none")
+            })?;
+        row.get::<i64>(0)
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))
+    }
+
+    async fn collect_text_column(
+        conn: &libsql::Connection,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+        operation: &'static str,
+    ) -> Result<Vec<String>, ProviderError> {
+        let mut rows = conn
+            .query(sql, params)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?;
+        let mut values = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error(operation, e))?
+        {
+            values.push(
+                row.get::<String>(0)
+                    .map_err(|e| Self::libsql_to_provider_error(operation, e))?,
+            );
+        }
+        Ok(values)
+    }
 }
+
+/// Schema revision applied by [`NativeLibsqlProvider::migrate`].
+/// Bump when making backward-compatible DDL additions.
+pub const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA_STATEMENTS: &[&str] = &[
     r#"
@@ -488,8 +1163,8 @@ impl Provider for NativeLibsqlProvider {
         filter: Option<&DispatcherCapabilityFilter>,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("fetch_orchestration_item", e))?;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -850,8 +1525,8 @@ impl Provider for NativeLibsqlProvider {
         cancelled_activities: Vec<ScheduledActivityIdentifier>,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("ack_orchestration_item", e))?;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -1246,8 +1921,8 @@ impl Provider for NativeLibsqlProvider {
         ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("abandon_orchestration_item", e))?;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -1309,8 +1984,8 @@ impl Provider for NativeLibsqlProvider {
 
     async fn read(&self, instance: &str) -> Result<Vec<Event>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("read", e))?;
         let mut rows = conn
             .query(
@@ -1337,8 +2012,8 @@ impl Provider for NativeLibsqlProvider {
         execution_id: u64,
     ) -> Result<Vec<Event>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("read_with_execution", e))?;
         Self::read_execution_history(&conn, instance, execution_id, "read_with_execution").await
     }
@@ -1350,8 +2025,8 @@ impl Provider for NativeLibsqlProvider {
         new_events: Vec<Event>,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("append_with_execution", e))?;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -1388,8 +2063,8 @@ impl Provider for NativeLibsqlProvider {
             ProviderError::permanent("enqueue_for_worker", format!("Serialization error: {e}"))
         })?;
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("enqueue_for_worker", e))?;
         conn.execute(
             r#"
@@ -1423,8 +2098,8 @@ impl Provider for NativeLibsqlProvider {
         }
 
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("fetch_work_item", e))?;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -1565,8 +2240,8 @@ impl Provider for NativeLibsqlProvider {
         completion: Option<WorkItem>,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("ack_work_item", e))?;
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
@@ -1619,8 +2294,8 @@ impl Provider for NativeLibsqlProvider {
         extend_for: Duration,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("renew_work_item_lock", e))?;
         let now_ms = Self::now_millis();
         let changed = conn
@@ -1669,8 +2344,8 @@ impl Provider for NativeLibsqlProvider {
         values.push(Value::Integer(idle_cutoff));
 
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("renew_session_lock", e))?;
         let changed = conn
             .execute(&sql, values)
@@ -1684,8 +2359,8 @@ impl Provider for NativeLibsqlProvider {
         _idle_timeout: Duration,
     ) -> Result<usize, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("cleanup_orphaned_sessions", e))?;
         let changed = conn
             .execute(
@@ -1710,8 +2385,8 @@ impl Provider for NativeLibsqlProvider {
         ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("abandon_work_item", e))?;
         let visible_at = delay
             .map(Self::timestamp_after)
@@ -1745,8 +2420,8 @@ impl Provider for NativeLibsqlProvider {
         extend_for: Duration,
     ) -> Result<(), ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("renew_orchestration_item_lock", e))?;
         let now_ms = Self::now_millis();
         let changed = conn
@@ -1780,8 +2455,8 @@ impl Provider for NativeLibsqlProvider {
             )
         })?;
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("enqueue_for_orchestrator", e))?;
         conn.execute(
             "INSERT INTO orchestrator_queue (instance_id, work_item, visible_at) VALUES (?1, ?2, ?3)",
@@ -1793,7 +2468,7 @@ impl Provider for NativeLibsqlProvider {
     }
 
     fn as_management_capability(&self) -> Option<&dyn ProviderAdmin> {
-        None
+        Some(self as &dyn ProviderAdmin)
     }
 
     async fn get_custom_status(
@@ -1802,8 +2477,8 @@ impl Provider for NativeLibsqlProvider {
         last_seen_version: u64,
     ) -> Result<Option<(Option<String>, u64)>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("get_custom_status", e))?;
         let mut rows = conn
             .query(
@@ -1848,8 +2523,8 @@ impl Provider for NativeLibsqlProvider {
         key: &str,
     ) -> Result<Option<String>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("get_kv_value", e))?;
 
         let mut delta_rows = conn
@@ -1896,8 +2571,8 @@ impl Provider for NativeLibsqlProvider {
         instance: &str,
     ) -> Result<std::collections::HashMap<String, String>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("get_kv_all_values", e))?;
         let mut map = std::collections::HashMap::new();
 
@@ -1960,8 +2635,8 @@ impl Provider for NativeLibsqlProvider {
         instance: &str,
     ) -> Result<Option<SystemStats>, ProviderError> {
         let conn = self
-            .db
             .connect()
+            .await
             .map_err(|e| Self::libsql_to_provider_error("get_instance_stats", e))?;
 
         let mut rows = conn
@@ -2087,5 +2762,816 @@ impl Provider for NativeLibsqlProvider {
             kv_user_key_count: kv_user_key_count as u64,
             kv_total_value_bytes: kv_total_value_bytes as u64,
         }))
+    }
+}
+
+const DEFAULT_BULK_OPERATION_LIMIT: u32 = 1000;
+
+#[async_trait::async_trait]
+impl ProviderAdmin for NativeLibsqlProvider {
+    async fn list_instances(&self) -> Result<Vec<String>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_instances", e))?;
+        Self::collect_text_column(
+            &conn,
+            "SELECT instance_id FROM instances ORDER BY created_at DESC",
+            (),
+            "list_instances",
+        )
+        .await
+    }
+
+    async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_instances_by_status", e))?;
+        Self::collect_text_column(
+            &conn,
+            r#"
+            SELECT i.instance_id
+            FROM instances i
+            JOIN executions e ON i.instance_id = e.instance_id AND i.current_execution_id = e.execution_id
+            WHERE e.status = ?1
+            ORDER BY i.created_at DESC
+            "#,
+            params![status],
+            "list_instances_by_status",
+        )
+        .await
+    }
+
+    async fn list_executions(&self, instance: &str) -> Result<Vec<u64>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT execution_id FROM executions WHERE instance_id = ?1 ORDER BY execution_id",
+                params![instance],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?;
+        let mut executions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?
+        {
+            let execution_id = row
+                .get::<i64>(0)
+                .map_err(|e| Self::libsql_to_provider_error("list_executions", e))?;
+            executions.push(execution_id as u64);
+        }
+        Ok(executions)
+    }
+
+    async fn read_history_with_execution_id(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<Vec<Event>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("read_history_with_execution_id", e))?;
+        Self::read_execution_history(
+            &conn,
+            instance,
+            execution_id,
+            "read_history_with_execution_id",
+        )
+        .await
+    }
+
+    async fn read_history(&self, instance: &str) -> Result<Vec<Event>, ProviderError> {
+        let execution_id = self.latest_execution_id(instance).await?;
+        self.read_history_with_execution_id(instance, execution_id)
+            .await
+    }
+
+    async fn latest_execution_id(&self, instance: &str) -> Result<u64, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(MAX(execution_id), 1) FROM executions WHERE instance_id = ?1",
+                params![instance],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?
+        {
+            Some(row) => {
+                let max_id = row
+                    .get::<i64>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("latest_execution_id", e))?;
+                Ok(max_id as u64)
+            }
+            None => Ok(1),
+        }
+    }
+
+    async fn get_instance_info(&self, instance: &str) -> Result<InstanceInfo, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    i.instance_id,
+                    i.orchestration_name,
+                    i.orchestration_version,
+                    i.current_execution_id,
+                    i.created_at,
+                    i.updated_at,
+                    i.parent_instance_id,
+                    e.status,
+                    e.output
+                FROM instances i
+                LEFT JOIN executions e ON i.instance_id = e.instance_id AND i.current_execution_id = e.execution_id
+                WHERE i.instance_id = ?1
+                "#,
+                params![instance],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
+        else {
+            return Err(ProviderError::permanent(
+                "get_instance_info",
+                format!("Instance {instance} not found"),
+            ));
+        };
+
+        let instance_id = row
+            .get::<String>(0)
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?;
+        let orchestration_name = row
+            .get::<String>(1)
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?;
+        let orchestration_version = match row.get_value(2).map_err(|e| {
+            ProviderError::permanent(
+                "get_instance_info",
+                format!("Failed to get orchestration_version: {e}"),
+            )
+        })? {
+            Value::Text(v) => v,
+            _ => "unknown".to_string(),
+        };
+        let current_execution_id = row
+            .get::<i64>(3)
+            .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
+            as u64;
+        let created_at = Self::coerce_timestamp(row.get_value(4).map_err(|e| {
+            ProviderError::permanent("get_instance_info", format!("Failed to get created_at: {e}"))
+        })?);
+        let updated_at = Self::coerce_timestamp(row.get_value(5).map_err(|e| {
+            ProviderError::permanent("get_instance_info", format!("Failed to get updated_at: {e}"))
+        })?);
+        let parent_instance_id = Self::optional_text(row.get_value(6).map_err(|e| {
+            ProviderError::permanent(
+                "get_instance_info",
+                format!("Failed to get parent_instance_id: {e}"),
+            )
+        })?);
+        let status = match row.get_value(7).map_err(|e| {
+            ProviderError::permanent("get_instance_info", format!("Failed to get status: {e}"))
+        })? {
+            Value::Text(v) => v,
+            _ => "Unknown".to_string(),
+        };
+        let output = Self::optional_text(row.get_value(8).map_err(|e| {
+            ProviderError::permanent("get_instance_info", format!("Failed to get output: {e}"))
+        })?);
+
+        Ok(InstanceInfo {
+            instance_id,
+            orchestration_name,
+            orchestration_version,
+            current_execution_id,
+            status,
+            output,
+            created_at,
+            updated_at,
+            parent_instance_id,
+        })
+    }
+
+    async fn get_execution_info(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<ExecutionInfo, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    e.execution_id,
+                    e.status,
+                    e.output,
+                    e.started_at,
+                    e.completed_at,
+                    COUNT(h.event_id) as event_count
+                FROM executions e
+                LEFT JOIN history h ON e.instance_id = h.instance_id AND e.execution_id = h.execution_id
+                WHERE e.instance_id = ?1 AND e.execution_id = ?2
+                GROUP BY e.execution_id, e.status, e.output, e.started_at, e.completed_at
+                "#,
+                params![instance, execution_id as i64],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+        else {
+            return Err(ProviderError::permanent(
+                "get_execution_info",
+                format!("Execution {execution_id} not found for instance {instance}"),
+            ));
+        };
+
+        let execution_id = row
+            .get::<i64>(0)
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+            as u64;
+        let status = row
+            .get::<String>(1)
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?;
+        let output = Self::optional_text(row.get_value(2).map_err(|e| {
+            ProviderError::permanent("get_execution_info", format!("Failed to get output: {e}"))
+        })?);
+        let started_at = Self::coerce_timestamp(row.get_value(3).map_err(|e| {
+            ProviderError::permanent(
+                "get_execution_info",
+                format!("Failed to get started_at: {e}"),
+            )
+        })?);
+        let completed_at = match row.get_value(4).map_err(|e| {
+            ProviderError::permanent(
+                "get_execution_info",
+                format!("Failed to get completed_at: {e}"),
+            )
+        })? {
+            Value::Null => None,
+            value => Some(Self::coerce_timestamp(value)),
+        };
+        let event_count = row
+            .get::<i64>(5)
+            .map_err(|e| Self::libsql_to_provider_error("get_execution_info", e))?
+            as usize;
+
+        Ok(ExecutionInfo {
+            execution_id,
+            status,
+            output,
+            started_at,
+            completed_at,
+            event_count,
+        })
+    }
+
+    async fn get_system_metrics(&self) -> Result<SystemMetrics, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    COUNT(*) as total_instances,
+                    COALESCE(SUM(CASE WHEN e.status = 'Running' THEN 1 ELSE 0 END), 0) as running_instances,
+                    COALESCE(SUM(CASE WHEN e.status = 'Completed' THEN 1 ELSE 0 END), 0) as completed_instances,
+                    COALESCE(SUM(CASE WHEN e.status = 'Failed' THEN 1 ELSE 0 END), 0) as failed_instances
+                FROM instances i
+                LEFT JOIN executions e ON i.instance_id = e.instance_id AND i.current_execution_id = e.execution_id
+                "#,
+                (),
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+        else {
+            return Ok(SystemMetrics::default());
+        };
+
+        let total_instances = row
+            .get::<i64>(0)
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+            as u64;
+        let running_instances = row
+            .get::<i64>(1)
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+            as u64;
+        let completed_instances = row
+            .get::<i64>(2)
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+            as u64;
+        let failed_instances = row
+            .get::<i64>(3)
+            .map_err(|e| Self::libsql_to_provider_error("get_system_metrics", e))?
+            as u64;
+        drop(rows);
+
+        let total_executions =
+            Self::query_count(&conn, "SELECT COUNT(*) FROM executions", (), "get_system_metrics")
+                .await? as u64;
+        let total_events =
+            Self::query_count(&conn, "SELECT COUNT(*) FROM history", (), "get_system_metrics")
+                .await? as u64;
+
+        Ok(SystemMetrics {
+            total_instances,
+            total_executions,
+            running_instances,
+            completed_instances,
+            failed_instances,
+            total_events,
+        })
+    }
+
+    async fn get_queue_depths(&self) -> Result<QueueDepths, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_queue_depths", e))?;
+        let orchestrator_queue = Self::query_count(
+            &conn,
+            "SELECT COUNT(*) FROM orchestrator_queue WHERE lock_token IS NULL",
+            (),
+            "get_queue_depths",
+        )
+        .await? as usize;
+        let worker_queue = Self::query_count(
+            &conn,
+            "SELECT COUNT(*) FROM worker_queue WHERE lock_token IS NULL",
+            (),
+            "get_queue_depths",
+        )
+        .await? as usize;
+
+        Ok(QueueDepths {
+            orchestrator_queue,
+            worker_queue,
+            timer_queue: 0,
+        })
+    }
+
+    async fn list_children(&self, instance_id: &str) -> Result<Vec<String>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("list_children", e))?;
+        Self::collect_text_column(
+            &conn,
+            "SELECT instance_id FROM instances WHERE parent_instance_id = ?1",
+            params![instance_id],
+            "list_children",
+        )
+        .await
+    }
+
+    async fn get_parent_id(&self, instance_id: &str) -> Result<Option<String>, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?;
+        let mut rows = conn
+            .query(
+                "SELECT parent_instance_id FROM instances WHERE instance_id = ?1",
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("get_parent_id", e))?
+        {
+            Some(row) => Ok(Self::optional_text(row.get_value(0).map_err(|e| {
+                ProviderError::permanent(
+                    "get_parent_id",
+                    format!("Failed to get parent_instance_id: {e}"),
+                )
+            })?)),
+            None => Err(ProviderError::permanent(
+                "get_parent_id",
+                format!("Instance {instance_id} not found"),
+            )),
+        }
+    }
+
+    async fn delete_instances_atomic(
+        &self,
+        ids: &[String],
+        force: bool,
+    ) -> Result<DeleteInstanceResult, ProviderError> {
+        if ids.is_empty() {
+            return Ok(DeleteInstanceResult::default());
+        }
+
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        let placeholders = Self::placeholders(ids.len(), 1);
+        let id_params = Self::id_values(ids);
+
+        if !force {
+            let check_sql = format!(
+                r#"
+                SELECT i.instance_id, e.status
+                FROM instances i
+                LEFT JOIN executions e ON i.instance_id = e.instance_id AND i.current_execution_id = e.execution_id
+                WHERE i.instance_id IN ({placeholders})
+                "#
+            );
+            let mut rows = conn
+                .query(&check_sql, id_params.clone())
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?
+            {
+                let status = Self::optional_text(row.get_value(1).map_err(|e| {
+                    ProviderError::permanent(
+                        "delete_instances_atomic",
+                        format!("Failed to get status: {e}"),
+                    )
+                })?);
+                if status.as_deref() == Some("Running") {
+                    let instance_id = row
+                        .get::<String>(0)
+                        .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+                    return Err(ProviderError::permanent(
+                        "delete_instances_atomic",
+                        format!(
+                            "Instance {instance_id} is still running. Use force=true to delete anyway, or cancel first."
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+
+        let child_placeholders = Self::placeholders(ids.len(), ids.len() + 1);
+        let orphan_sql = format!(
+            r#"
+            SELECT instance_id, parent_instance_id FROM instances
+            WHERE parent_instance_id IN ({placeholders})
+              AND instance_id NOT IN ({child_placeholders})
+            LIMIT 1
+            "#
+        );
+        let mut orphan_params = id_params.clone();
+        orphan_params.extend(Self::id_values(ids));
+        let mut orphan_rows = tx
+            .query(&orphan_sql, orphan_params)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        if let Some(orphan_row) = orphan_rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?
+        {
+            let orphan_id = orphan_row
+                .get::<String>(0)
+                .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+            let parent_id = orphan_row
+                .get::<String>(1)
+                .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+            return Err(ProviderError::permanent(
+                "delete_instances_atomic",
+                format!(
+                    "Cannot delete: instance {parent_id} has child {orphan_id} that was created after tree traversal. \
+                     Re-fetch the tree and retry."
+                ),
+            ));
+        }
+        drop(orphan_rows);
+
+        let mut result = DeleteInstanceResult::default();
+        result.events_deleted = Self::query_count_tx(
+            &tx,
+            &format!("SELECT COUNT(*) FROM history WHERE instance_id IN ({placeholders})"),
+            id_params.clone(),
+            "delete_instances_atomic",
+        )
+        .await? as u64;
+        result.executions_deleted = Self::query_count_tx(
+            &tx,
+            &format!("SELECT COUNT(*) FROM executions WHERE instance_id IN ({placeholders})"),
+            id_params.clone(),
+            "delete_instances_atomic",
+        )
+        .await? as u64;
+        let orch_q_count = Self::query_count_tx(
+            &tx,
+            &format!(
+                "SELECT COUNT(*) FROM orchestrator_queue WHERE instance_id IN ({placeholders})"
+            ),
+            id_params.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        let worker_q_count = Self::query_count_tx(
+            &tx,
+            &format!("SELECT COUNT(*) FROM worker_queue WHERE instance_id IN ({placeholders})"),
+            id_params.clone(),
+            "delete_instances_atomic",
+        )
+        .await?;
+        result.queue_messages_deleted = (orch_q_count + worker_q_count) as u64;
+
+        for table in [
+            "history",
+            "executions",
+            "orchestrator_queue",
+            "worker_queue",
+            "instance_locks",
+            "kv_store",
+            "kv_delta",
+            "instances",
+        ] {
+            let sql = format!("DELETE FROM {table} WHERE instance_id IN ({placeholders})");
+            tx.execute(&sql, id_params.clone())
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+
+        result.instances_deleted = ids.len() as u64;
+        Ok(result)
+    }
+
+    async fn delete_instance_bulk(
+        &self,
+        filter: InstanceFilter,
+    ) -> Result<DeleteInstanceResult, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("delete_instance_bulk", e))?;
+
+        let mut sql = String::from(
+            r#"
+            SELECT i.instance_id
+            FROM instances i
+            LEFT JOIN executions e ON i.instance_id = e.instance_id AND i.current_execution_id = e.execution_id
+            WHERE i.parent_instance_id IS NULL
+              AND e.status IN ('Completed', 'Failed', 'ContinuedAsNew')
+            "#,
+        );
+        let mut values = Vec::new();
+        let mut next_param = 1usize;
+
+        if let Some(ref ids) = filter.instance_ids {
+            if ids.is_empty() {
+                return Ok(DeleteInstanceResult::default());
+            }
+            let placeholders = Self::placeholders(ids.len(), next_param);
+            sql.push_str(&format!(" AND i.instance_id IN ({placeholders})"));
+            values.extend(Self::id_values(ids));
+            next_param += ids.len();
+        }
+
+        if let Some(completed_before) = filter.completed_before {
+            sql.push_str(&format!(" AND e.completed_at < ?{next_param}"));
+            values.push(Value::Integer(completed_before as i64));
+        }
+
+        let limit = filter.limit.unwrap_or(DEFAULT_BULK_OPERATION_LIMIT);
+        sql.push_str(&format!(" LIMIT {limit}"));
+
+        let instance_ids =
+            Self::collect_text_column(&conn, &sql, values, "delete_instance_bulk").await?;
+        if instance_ids.is_empty() {
+            return Ok(DeleteInstanceResult::default());
+        }
+
+        let mut result = DeleteInstanceResult::default();
+        for instance_id in &instance_ids {
+            let tree = self.get_instance_tree(instance_id).await?;
+            let tree_size = tree.all_ids.len() as u64;
+            let delete_result = self.delete_instances_atomic(&tree.all_ids, true).await?;
+            result.executions_deleted += delete_result.executions_deleted;
+            result.events_deleted += delete_result.events_deleted;
+            result.queue_messages_deleted += delete_result.queue_messages_deleted;
+            result.instances_deleted += tree_size;
+        }
+
+        Ok(result)
+    }
+
+    async fn prune_executions(
+        &self,
+        instance_id: &str,
+        options: PruneOptions,
+    ) -> Result<PruneResult, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+
+        let mut current_rows = conn
+            .query(
+                "SELECT current_execution_id FROM instances WHERE instance_id = ?1",
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+        let current_execution_id = match current_rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?
+        {
+            Some(row) => row
+                .get::<i64>(0)
+                .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?,
+            None => {
+                return Err(ProviderError::permanent(
+                    "prune_executions",
+                    format!("Instance {instance_id} not found"),
+                ));
+            }
+        };
+        drop(current_rows);
+
+        let mut conditions = vec![
+            "instance_id = ?1".to_string(),
+            "execution_id != ?2".to_string(),
+            "status != 'Running'".to_string(),
+        ];
+        let mut values = vec![
+            Value::Text(instance_id.to_string()),
+            Value::Integer(current_execution_id),
+        ];
+        let mut next_param = 3usize;
+
+        if let Some(keep_last) = options.keep_last {
+            conditions.push(format!(
+                "execution_id NOT IN (SELECT execution_id FROM executions WHERE instance_id = ?{next_param} ORDER BY execution_id DESC LIMIT {keep_last})"
+            ));
+            values.push(Value::Text(instance_id.to_string()));
+            next_param += 1;
+        }
+
+        if let Some(completed_before) = options.completed_before {
+            conditions.push(format!("completed_at < ?{next_param}"));
+            values.push(Value::Integer(completed_before as i64));
+        }
+
+        let sql = format!(
+            "SELECT execution_id FROM executions WHERE {}",
+            conditions.join(" AND ")
+        );
+        let mut rows = conn
+            .query(&sql, values)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+        let mut execution_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?
+        {
+            execution_ids.push(
+                row.get::<i64>(0)
+                    .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?,
+            );
+        }
+        drop(rows);
+
+        if execution_ids.is_empty() {
+            return Ok(PruneResult {
+                instances_processed: 1,
+                ..Default::default()
+            });
+        }
+
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+
+        let mut result = PruneResult {
+            instances_processed: 1,
+            ..Default::default()
+        };
+
+        for exec_id in &execution_ids {
+            let history_count = Self::query_count_tx(
+                &tx,
+                "SELECT COUNT(*) FROM history WHERE instance_id = ?1 AND execution_id = ?2",
+                params![instance_id, *exec_id],
+                "prune_executions",
+            )
+            .await?;
+            tx.execute(
+                "DELETE FROM history WHERE instance_id = ?1 AND execution_id = ?2",
+                params![instance_id, *exec_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+            tx.execute(
+                "DELETE FROM executions WHERE instance_id = ?1 AND execution_id = ?2",
+                params![instance_id, *exec_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+            result.executions_deleted += 1;
+            result.events_deleted += history_count as u64;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions", e))?;
+
+        Ok(result)
+    }
+
+    async fn prune_executions_bulk(
+        &self,
+        filter: InstanceFilter,
+        options: PruneOptions,
+    ) -> Result<PruneResult, ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("prune_executions_bulk", e))?;
+
+        let mut sql = String::from(
+            r#"
+            SELECT i.instance_id
+            FROM instances i
+            LEFT JOIN executions e ON i.instance_id = e.instance_id AND i.current_execution_id = e.execution_id
+            WHERE 1=1
+            "#,
+        );
+        let mut values = Vec::new();
+        let mut next_param = 1usize;
+
+        if let Some(ref ids) = filter.instance_ids {
+            if ids.is_empty() {
+                return Ok(PruneResult::default());
+            }
+            let placeholders = Self::placeholders(ids.len(), next_param);
+            sql.push_str(&format!(" AND i.instance_id IN ({placeholders})"));
+            values.extend(Self::id_values(ids));
+            next_param += ids.len();
+        }
+
+        if let Some(completed_before) = filter.completed_before {
+            sql.push_str(&format!(" AND e.completed_at < ?{next_param}"));
+            values.push(Value::Integer(completed_before as i64));
+        }
+
+        let limit = filter.limit.unwrap_or(1000);
+        sql.push_str(&format!(" LIMIT {limit}"));
+
+        let instance_ids =
+            Self::collect_text_column(&conn, &sql, values, "prune_executions_bulk").await?;
+
+        let mut result = PruneResult::default();
+        for instance_id in &instance_ids {
+            let single_result = self.prune_executions(instance_id, options.clone()).await?;
+            result.instances_processed += single_result.instances_processed;
+            result.executions_deleted += single_result.executions_deleted;
+            result.events_deleted += single_result.events_deleted;
+        }
+
+        Ok(result)
     }
 }

@@ -1,8 +1,13 @@
 /target/
+/tmp/
+/tools/bin/
 *.db
 *.db-*
 *.sqlite
 *.sqlite3
+*.sqld/
+data.sqld/
+sqld-data/
 .env
 .env.*
 !.env.example

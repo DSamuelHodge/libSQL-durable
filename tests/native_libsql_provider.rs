@@ -3,8 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use duroxide::provider_validations::ProviderFactory;
-use duroxide::provider_validations::test_multi_operation_atomic_ack;
+use duroxide::provider_validations::bulk_deletion::test_delete_instance_bulk_safety_and_limits;
+use duroxide::provider_validations::prune::test_prune_safety;
+use duroxide::provider_validations::{
+    ProviderFactory, test_get_execution_info, test_get_instance_info, test_get_queue_depths,
+    test_get_system_metrics, test_list_executions, test_list_instances,
+    test_list_instances_by_status, test_multi_operation_atomic_ack,
+};
 use duroxide::providers::{Provider, TagFilter, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
 use libsql::params;
@@ -14,7 +19,7 @@ use tempfile::TempDir;
 async fn native_provider() -> (TempDir, LibsqlProvider) {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = dir.path().join("native.db");
-    let provider = LibsqlProvider::new(LibsqlDatabaseConfig::Local { path })
+    let provider = LibsqlProvider::new(LibsqlDatabaseConfig::local(path))
         .await
         .expect("failed to create native provider");
     (dir, provider)
@@ -33,7 +38,7 @@ impl ProviderFactory for NativeLibsqlTestFactory {
                 .expect("system clock should be after UNIX epoch")
                 .as_nanos()
         ));
-        let provider = LibsqlProvider::new(LibsqlDatabaseConfig::Local { path })
+        let provider = LibsqlProvider::new(LibsqlDatabaseConfig::local(path))
             .await
             .expect("failed to create native validation provider");
         Arc::new(provider)
@@ -66,6 +71,27 @@ fn started_event(instance: &str) -> Event {
 async fn native_multi_operation_atomic_ack_validation() {
     let factory = NativeLibsqlTestFactory;
     test_multi_operation_atomic_ack(&factory).await;
+}
+
+#[tokio::test]
+async fn native_provider_management_validations() {
+    let factory = NativeLibsqlTestFactory;
+
+    test_list_instances(&factory).await;
+    test_list_instances_by_status(&factory).await;
+    test_list_executions(&factory).await;
+    test_get_instance_info(&factory).await;
+    test_get_execution_info(&factory).await;
+    test_get_system_metrics(&factory).await;
+    test_get_queue_depths(&factory).await;
+}
+
+#[tokio::test]
+async fn native_provider_admin_prune_and_bulk_delete() {
+    let factory = NativeLibsqlTestFactory;
+
+    test_prune_safety(&factory).await;
+    test_delete_instance_bulk_safety_and_limits(&factory).await;
 }
 
 #[tokio::test]

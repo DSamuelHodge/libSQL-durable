@@ -21,7 +21,7 @@ impl LocalLibsqlFactory {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let path = temp_dir.path().join(db_name);
         Self {
-            config: LibsqlDatabaseConfig::Local { path },
+            config: LibsqlDatabaseConfig::local(path),
             _temp_dir: temp_dir,
         }
     }

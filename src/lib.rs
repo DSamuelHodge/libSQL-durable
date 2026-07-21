@@ -12,17 +12,19 @@ compile_error!(
     "features `compat-sqlite` and `native-libsql` cannot be enabled together because SQLx's bundled SQLite and libsql-ffi both export SQLite C symbols"
 );
 
+mod config;
 #[cfg(feature = "compat-sqlite")]
 mod compat;
 #[cfg(feature = "native-libsql")]
 mod native;
 
+pub use config::{LibsqlDatabaseConfig, LibsqlDatabaseMode, LibsqlEngineOptions};
 pub use duroxide;
 
 #[cfg(feature = "compat-sqlite")]
 pub use compat::CompatSqliteProvider;
 #[cfg(feature = "native-libsql")]
-pub use native::NativeLibsqlProvider;
+pub use native::{NativeLibsqlProvider, ProviderTuning, SCHEMA_VERSION};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LibsqlProviderInitError {
@@ -33,65 +35,14 @@ pub enum LibsqlProviderInitError {
     #[error("libSQL initialization failed: {0}")]
     Libsql(#[from] libsql::Error),
     #[cfg(feature = "compat-sqlite")]
-    #[error("remote libSQL backends require the native libSQL transaction port")]
+    #[error("remote/offline libSQL backends require the native libSQL transaction port")]
     RemoteNativePortRequired,
+    #[error("local encryption was requested but the crate was built without the `encryption` feature")]
+    EncryptionFeatureDisabled,
     #[error("no provider backend feature is enabled")]
     NoBackendFeatureEnabled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LibsqlDatabaseConfig {
-    InMemory,
-    Local {
-        path: PathBuf,
-    },
-    Remote {
-        url: String,
-        auth_token: String,
-    },
-    RemoteReplica {
-        local_path: PathBuf,
-        remote_url: String,
-        auth_token: String,
-    },
-}
-
-impl LibsqlDatabaseConfig {
-    pub fn from_env() -> Self {
-        if let Ok(remote_url) = std::env::var("LIBSQL_REMOTE_URL") {
-            let auth_token = std::env::var("LIBSQL_AUTH_TOKEN").unwrap_or_default();
-            if let Ok(local_path) = std::env::var("LIBSQL_REPLICA_PATH") {
-                return Self::RemoteReplica {
-                    local_path: PathBuf::from(local_path),
-                    remote_url,
-                    auth_token,
-                };
-            }
-
-            return Self::Remote {
-                url: remote_url,
-                auth_token,
-            };
-        }
-
-        let url = std::env::var("LIBSQL_DATABASE_URL")
-            .unwrap_or_else(|_| "file:./stress-libsql.db".to_string());
-        Self::from_local_url(&url)
-    }
-
-    pub fn from_local_url(url: &str) -> Self {
-        if url == ":memory:" || url.contains(":memory:") || url.contains("mode=memory") {
-            return Self::InMemory;
-        }
-
-        let path = url
-            .strip_prefix("file:")
-            .or_else(|| url.strip_prefix("sqlite:"))
-            .unwrap_or(url);
-        Self::Local {
-            path: PathBuf::from(path),
-        }
-    }
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 pub enum LibsqlProvider {
@@ -122,11 +73,132 @@ impl LibsqlProvider {
     }
 
     pub async fn new_in_memory() -> Result<Self, LibsqlProviderInitError> {
-        Self::new(LibsqlDatabaseConfig::InMemory).await
+        Self::new(LibsqlDatabaseConfig::in_memory()).await
     }
 
     pub async fn new_local(path: impl Into<PathBuf>) -> Result<Self, LibsqlProviderInitError> {
-        Self::new(LibsqlDatabaseConfig::Local { path: path.into() }).await
+        Self::new(LibsqlDatabaseConfig::local(path)).await
+    }
+
+    /// Connect to a self-hosted remote `sqld`/`libsql-server` and apply schema.
+    #[cfg(feature = "native-libsql")]
+    pub async fn new_remote(
+        url: impl Into<String>,
+        auth_token: impl Into<String>,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        Self::new(LibsqlDatabaseConfig::remote(url, auth_token)).await
+    }
+
+    /// Open an embedded remote replica that syncs from a self-hosted primary.
+    #[cfg(feature = "native-libsql")]
+    pub async fn new_remote_replica(
+        local_path: impl Into<PathBuf>,
+        remote_url: impl Into<String>,
+        auth_token: impl Into<String>,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        Self::new(LibsqlDatabaseConfig::remote_replica(
+            local_path,
+            remote_url,
+            auth_token,
+        ))
+        .await
+    }
+
+    /// Offline-capable local DB that periodically syncs with a remote primary.
+    #[cfg(feature = "native-libsql")]
+    pub async fn new_offline_synced(
+        local_path: impl Into<PathBuf>,
+        remote_url: impl Into<String>,
+        auth_token: impl Into<String>,
+    ) -> Result<Self, LibsqlProviderInitError> {
+        Self::new(LibsqlDatabaseConfig::offline_synced(
+            local_path,
+            remote_url,
+            auth_token,
+        ))
+        .await
+    }
+
+    /// Re-apply schema migrations (idempotent).
+    #[cfg(feature = "native-libsql")]
+    pub async fn migrate(&self) -> Result<(), LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.migrate().await,
+        }
+    }
+
+    /// Sync an embedded replica / offline-synced DB with its primary.
+    #[cfg(feature = "native-libsql")]
+    pub async fn sync(&self) -> Result<Option<u64>, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.sync().await,
+        }
+    }
+
+    /// Current replication index when available.
+    #[cfg(feature = "native-libsql")]
+    pub async fn replication_index(&self) -> Result<Option<u64>, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.replication_index().await,
+        }
+    }
+
+    /// Applied schema version from `schema_meta`, if present.
+    #[cfg(feature = "native-libsql")]
+    pub async fn schema_version(&self) -> Result<Option<i64>, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.schema_version().await,
+        }
+    }
+
+    /// Clear orchestration runtime rows (keeps schema).
+    #[cfg(feature = "native-libsql")]
+    pub async fn clear_runtime_data(&self) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => provider.clear_runtime_data().await,
+        }
+    }
+
+    /// Execute arbitrary SQL against the underlying libSQL engine.
+    ///
+    /// This is the escape hatch for engine features the Duroxide provider does
+    /// not model (native vectors, WASM UDFs, custom tables, extensions).
+    #[cfg(feature = "native-libsql")]
+    pub async fn execute_sql(&self, sql: &str) -> Result<u64, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.execute_sql(sql).await,
+        }
+    }
+
+    /// Query arbitrary SQL; returns rows as text cells (NULL → None).
+    #[cfg(feature = "native-libsql")]
+    pub async fn query_sql(
+        &self,
+        sql: &str,
+    ) -> Result<Vec<Vec<Option<String>>>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.query_sql(sql).await,
+        }
+    }
+
+    /// Probe whether the connected engine supports native vector functions.
+    #[cfg(feature = "native-libsql")]
+    pub async fn engine_supports_vector(&self) -> Result<bool, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.engine_supports_vector().await,
+        }
+    }
+
+    /// Load a SQLite/libSQL extension (local engines; may be unsupported remote).
+    #[cfg(feature = "native-libsql")]
+    pub async fn load_extension(
+        &self,
+        dylib_path: impl AsRef<std::path::Path>,
+        entry_point: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => provider.load_extension(dylib_path, entry_point).await,
+        }
     }
 
     #[cfg(feature = "compat-sqlite")]
@@ -140,6 +212,22 @@ impl LibsqlProvider {
     pub fn native(&self) -> Option<&NativeLibsqlProvider> {
         match self {
             Self::Native(provider) => Some(provider),
+        }
+    }
+
+    /// Current connection/retry tuning (native backend only).
+    #[cfg(feature = "native-libsql")]
+    pub fn tuning(&self) -> Option<&ProviderTuning> {
+        match self {
+            Self::Native(provider) => Some(provider.tuning()),
+        }
+    }
+
+    /// Engine options used to open this provider (native only).
+    #[cfg(feature = "native-libsql")]
+    pub fn engine_options(&self) -> Option<&LibsqlEngineOptions> {
+        match self {
+            Self::Native(provider) => Some(provider.engine_options()),
         }
     }
 }

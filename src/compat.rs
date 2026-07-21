@@ -8,7 +8,7 @@ use duroxide::providers::{
 };
 use duroxide::{Event, SystemStats};
 
-use crate::{LibsqlDatabaseConfig, LibsqlProviderInitError};
+use crate::{LibsqlDatabaseConfig, LibsqlDatabaseMode, LibsqlProviderInitError};
 
 pub struct CompatSqliteProvider {
     inner: SqliteProvider,
@@ -16,10 +16,12 @@ pub struct CompatSqliteProvider {
 
 impl CompatSqliteProvider {
     pub async fn new(config: LibsqlDatabaseConfig) -> Result<Self, LibsqlProviderInitError> {
-        match config {
-            LibsqlDatabaseConfig::InMemory => Self::new_in_memory().await,
-            LibsqlDatabaseConfig::Local { path } => Self::new_local(path).await,
-            LibsqlDatabaseConfig::Remote { .. } | LibsqlDatabaseConfig::RemoteReplica { .. } => {
+        match config.mode {
+            LibsqlDatabaseMode::InMemory => Self::new_in_memory().await,
+            LibsqlDatabaseMode::Local { path } => Self::new_local(path).await,
+            LibsqlDatabaseMode::Remote { .. }
+            | LibsqlDatabaseMode::RemoteReplica { .. }
+            | LibsqlDatabaseMode::OfflineSynced { .. } => {
                 Err(LibsqlProviderInitError::RemoteNativePortRequired)
             }
         }
