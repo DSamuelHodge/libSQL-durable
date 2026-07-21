@@ -281,21 +281,26 @@ Parallelism after PR1: **PR2 ∥ PR3**, then **PR4→PR5** and **PR6→PR7** can
 
 ---
 
-### PR8 — Promote v1 (explicit, minimal) *[follow-on]*
+### PR8 — Promote v1 (explicit, minimal) — **implemented**
 
 **Goal:** Close explore/resolve loop without silent merge magic.
 
-**Scope (pick one v1 policy, document the other as non-goals):**
+**Shipped (policy A):** `promote_world_package` + `PromoteOptions` / `PromoteResult`
 
-- **A. File promote:** replace parent package with child only with explicit flag + parent_world_id check + backup copy  
-- **B. Selective import:** copy selected instance history/KV from child into parent under audit (harder; better long-term)
+- `confirm: true` required  
+- lineage check: child `parent_world_id` == parent `world_id`  
+- parent package backed up before replace  
+- `world_promote_audit` on promoted world  
+- optional `discard_child`  
+- CLI: `pvm promote --parent … --child … --confirm`  
+- tests in `tests/collapse_quality.rs`  
 
-Recommend **A** for v1 speed; **B** later.
+**Not in v1 (policy B):** selective event/KV merge into a live parent.
 
 **Acceptance**
 
-- [ ] Promote is explicit and auditable  
-- [ ] Cannot promote without acknowledging parent overwrite risk  
+- [x] Promote is explicit and auditable  
+- [x] Cannot promote without acknowledging parent overwrite risk  
 
 ---
 

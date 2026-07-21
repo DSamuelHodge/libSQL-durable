@@ -44,7 +44,10 @@ pub use definitions::{
     PVM_DEF_V1, ProcessDefinition, ProcessDefinitionPin, validate_definition_body,
 };
 #[cfg(feature = "native-libsql")]
-pub use fork::{ForkOptions, ForkResult, discard_world_package, fork_world_files};
+pub use fork::{
+    ForkOptions, ForkResult, PromoteOptions, PromoteResult, discard_world_package,
+    fork_world_files, promote_world_package,
+};
 #[cfg(feature = "native-libsql")]
 pub use heal::{
     DEFAULT_RUNAWAY_HISTORY_EVENTS, HealActionResult, HealOptions, HealReport, HealingAuditRow,

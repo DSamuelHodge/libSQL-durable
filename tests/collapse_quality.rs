@@ -8,8 +8,9 @@ use duroxide::runtime;
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::{ActivityContext, Client, OrchestrationStatus};
 use libsql_durable::{
-    ForkOptions, INTERPRETED_ORCH_NAME, LibsqlProvider, discard_world_package,
-    interpreted_orchestrations, validate_definition_body, wrap_interpret_input,
+    ForkOptions, INTERPRETED_ORCH_NAME, LibsqlProvider, PromoteOptions, discard_world_package,
+    interpreted_orchestrations, promote_world_package, validate_definition_body,
+    wrap_interpret_input,
 };
 
 fn activities() -> ActivityRegistry {
@@ -251,4 +252,134 @@ async fn invalid_pvm_def_rejected_on_put() {
     let bad = r#"{"schema":"pvm.def.v1","entry":"main","steps":[{"id":"main","op":"nope"}]}"#;
     let err = p.put_process_definition("Bad", "1", bad).await.unwrap_err();
     assert!(err.to_string().contains("unknown op") || err.to_string().contains("nope"));
+}
+
+#[tokio::test]
+async fn promote_requires_confirm() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("p.db");
+    let child = dir.path().join("c.db");
+    let p = LibsqlProvider::new_local(&parent).await.unwrap();
+    p.fork_world_to(&parent, &child, ForkOptions::explore())
+        .await
+        .unwrap();
+    let err = promote_world_package(&parent, &child, PromoteOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("confirm"),
+        "expected confirm refusal, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn promote_refuses_same_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("one.db");
+    let _ = LibsqlProvider::new_local(&path).await.unwrap();
+    let err = promote_world_package(&path, &path, PromoteOptions::confirmed())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("must differ") || err.to_string().contains("differ"));
+}
+
+#[tokio::test]
+async fn promote_with_lineage_backs_up_and_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent_path = dir.path().join("parent.db");
+    let child_path = dir.path().join("child.db");
+
+    let parent = LibsqlProvider::new_local(&parent_path).await.unwrap();
+    let parent_id = parent.world_manifest().await.unwrap().unwrap().world_id;
+    parent
+        .put_process_definition("OnlyParent", "1.0.0", r#"{"side":"parent"}"#)
+        .await
+        .unwrap();
+
+    let (fork, child) = parent
+        .fork_and_open(&parent_path, &child_path, ForkOptions::explore())
+        .await
+        .unwrap();
+    assert_eq!(fork.parent_world_id, parent_id);
+    let child_id = fork.child_world_id.clone();
+    child
+        .put_process_definition("OnlyChild", "1.0.0", r#"{"side":"child"}"#)
+        .await
+        .unwrap();
+    drop(child);
+    drop(parent);
+
+    let result = promote_world_package(
+        &parent_path,
+        &child_path,
+        PromoteOptions::confirmed()
+            .with_discard_child(true)
+            .with_note("quality promote"),
+    )
+    .await
+    .unwrap();
+
+    assert!(result.backup_path.exists());
+    assert!(result.discarded_child);
+    assert!(!child_path.exists());
+    assert_eq!(result.previous_parent_world_id, parent_id);
+    assert_eq!(result.promoted_world_id, child_id);
+
+    let promoted = LibsqlProvider::new_local(&parent_path).await.unwrap();
+    assert!(
+        promoted
+            .get_process_definition("OnlyChild", "1.0.0")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let m = promoted.world_manifest().await.unwrap().unwrap();
+    assert_eq!(m.world_id, child_id);
+    assert_eq!(m.parent_world_id.as_deref(), Some(parent_id.as_str()));
+
+    let bak = LibsqlProvider::new_local(&result.backup_path)
+        .await
+        .unwrap();
+    assert_eq!(
+        bak.world_manifest().await.unwrap().unwrap().world_id,
+        parent_id
+    );
+    assert!(
+        bak.get_process_definition("OnlyParent", "1.0.0")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        bak.get_process_definition("OnlyChild", "1.0.0")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let rows = promoted
+        .query_sql(
+            "SELECT previous_world_id, promoted_from_child_id, note FROM world_promote_audit",
+        )
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(rows[0][0].as_deref(), Some(parent_id.as_str()));
+    assert_eq!(rows[0][1].as_deref(), Some(child_id.as_str()));
+}
+
+#[tokio::test]
+async fn promote_lineage_mismatch_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.db");
+    let b = dir.path().join("b.db");
+    let _ = LibsqlProvider::new_local(&a).await.unwrap();
+    let _ = LibsqlProvider::new_local(&b).await.unwrap();
+    let err = promote_world_package(&a, &b, PromoteOptions::confirmed())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("lineage") || err.to_string().contains("parent_world_id"),
+        "{err}"
+    );
 }

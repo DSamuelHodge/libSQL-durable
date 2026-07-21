@@ -18,8 +18,9 @@ use duroxide::runtime;
 use duroxide::runtime::registry::{ActivityRegistry, OrchestrationRegistry};
 use duroxide::{ActivityContext, Client, OrchestrationContext};
 use libsql_durable::{
-    HealOptions, INTERPRETED_ORCH_NAME, LibsqlDatabaseConfig, LibsqlProvider, SCHEMA_VERSION,
-    WORLD_FORMAT_VERSION, interpreted_orchestrations, wrap_interpret_input,
+    HealOptions, INTERPRETED_ORCH_NAME, LibsqlDatabaseConfig, LibsqlProvider, PromoteOptions,
+    SCHEMA_VERSION, WORLD_FORMAT_VERSION, interpreted_orchestrations, promote_world_package,
+    wrap_interpret_input,
 };
 
 #[derive(Debug, Parser)]
@@ -148,6 +149,27 @@ enum Commands {
         instance: Option<String>,
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
+    },
+    /// Promote child world file over parent (explicit; backs up parent first).
+    Promote {
+        /// Parent world database path (replaced on success).
+        #[arg(long)]
+        parent: PathBuf,
+        /// Child (fork) world database path.
+        #[arg(long)]
+        child: PathBuf,
+        /// Required acknowledgement — refuse without this flag.
+        #[arg(long)]
+        confirm: bool,
+        /// Delete child package after successful promote.
+        #[arg(long)]
+        discard_child: bool,
+        /// Skip parent_world_id lineage check (dangerous).
+        #[arg(long)]
+        no_lineage_check: bool,
+        /// Optional note stored in world_promote_audit.
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -336,6 +358,34 @@ async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             instance,
             wait_secs,
         } => cmd_interpret(world, definition, input, instance, wait_secs).await,
+        Commands::Promote {
+            parent,
+            child,
+            confirm,
+            discard_child,
+            no_lineage_check,
+            note,
+        } => {
+            let mut opts = PromoteOptions {
+                confirm,
+                discard_child,
+                note,
+                ..Default::default()
+            };
+            if no_lineage_check {
+                opts.require_lineage = false;
+            }
+            let result = promote_world_package(&parent, &child, opts).await?;
+            println!(
+                "promoted child → parent\n  parent={}\n  backup={}\n  previous_parent_id={}\n  promoted_world_id={}\n  discarded_child={}",
+                result.parent_path.display(),
+                result.backup_path.display(),
+                result.previous_parent_world_id,
+                result.promoted_world_id,
+                result.discarded_child
+            );
+            Ok(())
+        }
     }
 }
 

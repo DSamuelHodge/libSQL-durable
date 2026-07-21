@@ -225,12 +225,278 @@ pub fn discard_world_package(path: impl AsRef<Path>) -> Result<(), LibsqlProvide
             paths.db.display()
         )));
     }
+    remove_package_files(&paths)?;
+    Ok(())
+}
+
+/// Options for file-level promote (replace parent package with child).
+#[derive(Debug, Clone)]
+pub struct PromoteOptions {
+    /// Must be `true` — refuse otherwise (no silent overwrite).
+    pub confirm: bool,
+    /// Require `child.parent_world_id == parent.world_id` (default true).
+    pub require_lineage: bool,
+    /// Optional directory for parent backup; default next to parent as `*.promote-bak-<ts>`.
+    pub backup_dir: Option<PathBuf>,
+    /// Delete child package after successful promote.
+    pub discard_child: bool,
+    /// Note stored in promote audit on the promoted world.
+    pub note: Option<String>,
+}
+
+impl Default for PromoteOptions {
+    fn default() -> Self {
+        Self {
+            confirm: false,
+            require_lineage: true,
+            backup_dir: None,
+            discard_child: false,
+            note: None,
+        }
+    }
+}
+
+impl PromoteOptions {
+    /// Explicit confirm required for any promote.
+    pub fn confirmed() -> Self {
+        Self {
+            confirm: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_discard_child(mut self, discard: bool) -> Self {
+        self.discard_child = discard;
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    pub fn without_lineage_check(mut self) -> Self {
+        self.require_lineage = false;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromoteResult {
+    pub parent_path: PathBuf,
+    pub backup_path: PathBuf,
+    pub child_path: PathBuf,
+    pub previous_parent_world_id: String,
+    pub promoted_world_id: String,
+    pub discarded_child: bool,
+}
+
+/// Promote child world **file** over parent (policy A).
+///
+/// Safety:
+/// - `options.confirm` must be true
+/// - parent ≠ child path
+/// - by default child must declare `parent_world_id` equal to parent's `world_id`
+/// - parent package is copied to a backup path first
+/// - then parent package is replaced with a copy of the child package
+///
+/// Callers must **not** hold open writers on parent/child packages.
+pub async fn promote_world_package(
+    parent_db: impl AsRef<Path>,
+    child_db: impl AsRef<Path>,
+    options: PromoteOptions,
+) -> Result<PromoteResult, LibsqlProviderInitError> {
+    if !options.confirm {
+        return Err(LibsqlProviderInitError::InvalidConfig(
+            "promote refused: set PromoteOptions.confirm = true (explicit acknowledgement required)"
+                .into(),
+        ));
+    }
+
+    let parent_path = parent_db.as_ref().to_path_buf();
+    let child_path = child_db.as_ref().to_path_buf();
+    if same_path(&parent_path, &child_path) {
+        return Err(LibsqlProviderInitError::InvalidConfig(
+            "promote refused: parent and child paths must differ".into(),
+        ));
+    }
+    if !parent_path.exists() {
+        return Err(LibsqlProviderInitError::InvalidConfig(format!(
+            "promote: parent world not found: {}",
+            parent_path.display()
+        )));
+    }
+    if !child_path.exists() {
+        return Err(LibsqlProviderInitError::InvalidConfig(format!(
+            "promote: child world not found: {}",
+            child_path.display()
+        )));
+    }
+
+    // Read lineage while packages are intact.
+    let parent = LibsqlProvider::new(LibsqlDatabaseConfig::local(&parent_path)).await?;
+    let child = LibsqlProvider::new(LibsqlDatabaseConfig::local(&child_path)).await?;
+    let parent_manifest = parent.world_manifest().await?.ok_or_else(|| {
+        LibsqlProviderInitError::InvalidConfig("parent world_manifest missing".into())
+    })?;
+    let child_manifest = child.world_manifest().await?.ok_or_else(|| {
+        LibsqlProviderInitError::InvalidConfig("child world_manifest missing".into())
+    })?;
+
+    if options.require_lineage {
+        match &child_manifest.parent_world_id {
+            Some(pid) if pid == &parent_manifest.world_id => {}
+            Some(pid) => {
+                return Err(LibsqlProviderInitError::InvalidConfig(format!(
+                    "promote lineage mismatch: child.parent_world_id={pid} parent.world_id={}",
+                    parent_manifest.world_id
+                )));
+            }
+            None => {
+                return Err(LibsqlProviderInitError::InvalidConfig(
+                    "promote refused: child has no parent_world_id (not a fork of this parent); use without_lineage_check only if intentional"
+                        .into(),
+                ));
+            }
+        }
+    }
+
+    let _ = parent.checkpoint_wal().await;
+    let _ = child.checkpoint_wal().await;
+    drop(parent);
+    drop(child);
+
+    let ts = world::now_millis();
+    let backup_path = match &options.backup_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                LibsqlProviderInitError::InvalidConfig(format!(
+                    "promote backup_dir {}: {e}",
+                    dir.display()
+                ))
+            })?;
+            dir.join(format!(
+                "{}.promote-bak-{ts}",
+                parent_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("world.db")
+            ))
+        }
+        None => PathBuf::from(format!("{}-promote-bak-{ts}", parent_path.display())),
+    };
+
+    // 1) Backup parent package
+    copy_world_package(&parent_path, &backup_path)?;
+
+    // 2) Remove parent package files so copy is clean
+    let parent_pkg = WorldPackagePaths::for_db(&parent_path);
+    remove_package_files(&parent_pkg)?;
+
+    // 3) Install child package at parent path
+    copy_world_package(&child_path, &parent_path)?;
+
+    // 4) Audit on promoted world (now at parent_path)
+    let promoted = LibsqlProvider::new(LibsqlDatabaseConfig::local(&parent_path)).await?;
+    if let Some(native) = promoted.native() {
+        let _ = native
+            .record_promote_audit(
+                &parent_manifest.world_id,
+                &child_manifest.world_id,
+                &backup_path.display().to_string(),
+                options.note.as_deref(),
+            )
+            .await;
+    }
+    let promoted_id = promoted
+        .world_manifest()
+        .await?
+        .map(|m| m.world_id)
+        .unwrap_or_else(|| child_manifest.world_id.clone());
+    drop(promoted);
+
+    let mut discarded_child = false;
+    if options.discard_child {
+        discard_world_package(&child_path)?;
+        discarded_child = true;
+    }
+
+    Ok(PromoteResult {
+        parent_path,
+        backup_path,
+        child_path,
+        previous_parent_world_id: parent_manifest.world_id,
+        promoted_world_id: promoted_id,
+        discarded_child,
+    })
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+fn remove_package_files(paths: &WorldPackagePaths) -> Result<(), LibsqlProviderInitError> {
     for p in [&paths.db, &paths.wal, &paths.shm] {
         if p.exists() {
             std::fs::remove_file(p).map_err(|e| {
-                LibsqlProviderInitError::InvalidConfig(format!("discard {}: {e}", p.display()))
+                LibsqlProviderInitError::InvalidConfig(format!("remove {}: {e}", p.display()))
             })?;
         }
     }
     Ok(())
+}
+
+impl NativeLibsqlProvider {
+    /// Append a promote audit row (best-effort table create).
+    pub async fn record_promote_audit(
+        &self,
+        previous_world_id: &str,
+        promoted_from_child_id: &str,
+        backup_path: &str,
+        note: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("record_promote_audit", e))?;
+        conn.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS world_promote_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                previous_world_id TEXT NOT NULL,
+                promoted_from_child_id TEXT NOT NULL,
+                backup_path TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL
+            )
+            "#,
+            (),
+        )
+        .await
+        .map_err(|e| Self::libsql_to_provider_error("record_promote_audit", e))?;
+        let now = Self::now_millis();
+        conn.execute(
+            r#"
+            INSERT INTO world_promote_audit
+              (previous_world_id, promoted_from_child_id, backup_path, note, created_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                previous_world_id,
+                promoted_from_child_id,
+                backup_path,
+                note.unwrap_or(""),
+                now
+            ],
+        )
+        .await
+        .map_err(|e| Self::libsql_to_provider_error("record_promote_audit", e))?;
+        Ok(())
+    }
 }

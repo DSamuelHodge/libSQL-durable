@@ -471,9 +471,10 @@ Policies (examples):
 
 This is the durable form of “spawn a subagent to try something”: not a side chat, a **forked computer**.
 
-**Status: implemented in-tree** — `src/fork.rs`, [`FORK.md`](./FORK.md), `tests/horizon.rs`.
+**Status: implemented in-tree** — `src/fork.rs`, [`FORK.md`](./FORK.md), `tests/horizon.rs` / `tests/collapse_quality.rs`.  
+Includes **explore presets**, `discard_world_package`, and **promote v1** (`promote_world_package`: confirm + lineage + backup + audit).
 
-**Exit criteria:** create a branch world from a historical point and run alternate syscalls safely; discard or promote results without corrupting the parent world.
+**Exit criteria:** create a branch world from a historical point and run alternate syscalls safely; discard or promote results without corrupting the recoverable parent (backup retained).
 
 ### Phase 6 — Adaptive policy
 

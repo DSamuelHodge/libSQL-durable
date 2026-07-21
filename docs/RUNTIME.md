@@ -47,6 +47,15 @@ Env alternatives: `PVM_WORLD`, `LIBSQL_DATABASE_URL`, `LIBSQL_REMOTE_URL` + `LIB
 | `why <instance>` | Why blocked |
 | `trace <instance>` | Journal projection |
 | `heal` | Full healing suite |
+| `def-put` / `def-list` | Store / list process definitions |
+| `interpret` | Run `pvm.interpret` for `Name@Version` |
+| `promote` | Replace parent world file with child (`--confirm` required) |
+
+```sh
+# After explore fork:
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  promote --parent ./parent.db --child ./child.db --confirm --discard-child
+```
 
 ## Stock host (v1)
 
