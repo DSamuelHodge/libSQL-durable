@@ -6,6 +6,8 @@ description: Conventional first hour with the PVM World kernel — product langu
 This is for **our development team**. Public onboarding will be redesigned later.  
 Goal: use the **World** as a computer in under an hour, without drowning in provider APIs.
 
+**Coding agents:** start at root [`AGENTS.md`](../AGENTS.md) — harness → PVM bridge + commands.
+
 ## 0. Mental model (2 minutes)
 
 ```text

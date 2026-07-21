@@ -10,6 +10,7 @@
 
 | Read first | |
 |---|---|
+| **Agents (coding agents)** | **[AGENTS.md](./AGENTS.md)** — collapse harness → World / Mesh |
 | Vision | [docs/vision.md](./docs/vision.md) |
 | Features & benefits | [docs/features.md](./docs/features.md) |
 | Get started (team) | [docs/get-started.md](./docs/get-started.md) |
