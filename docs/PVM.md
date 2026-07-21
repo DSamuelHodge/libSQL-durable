@@ -36,6 +36,75 @@ Common:  distributed cluster of services  →  hosts workflows
 PVM:     one durable world                →  can be hosted by 1 process or N
 ```
 
+### 1.1 Seismic implication: agents and harnesses collapse into the PVM
+
+The industry is building **layered agent stacks**:
+
+```text
+Typical agentic stack (diverging complexity)
+  agent framework
+    └── harness / runner
+          └── memory service
+          └── tool runtime
+          └── subagent spawner
+          └── orchestrator (optional)
+          └── database / queues / logs (several)
+```
+
+The PVM claim is the opposite convergence:
+
+```text
+PVM convergence
+  world (libSQL) + replay kernel (Duroxide) + durable kernel state (libsql-durable)
+       ≡ process machine
+  “agent”     ≡ process
+  “harness”   ≡ host CPU running the replay kernel
+  “tool/LLM”  ≡ syscall (activity)
+  “subagent”  ≡ child process  OR  forked world (see below)
+  “memory”    ≡ journal + KV + app tables in the same world
+```
+
+There is **no separate agent runtime to invent** once you accept that:
+
+1. A long-running, crash-safe control loop **is** a PVM process.  
+2. Model and tool I/O **are** syscalls (must cross the activity boundary).  
+3. Shared relational state **is** the same world medium processes already use.  
+4. Parallelism **is** multiple processes in one world (or many worlds).  
+5. Exploration **is** process hierarchy and/or **world fork (CoW)**, not a new abstraction.
+
+That is a seismic shift from systems that keep adding layers.  
+**We are early because we treat the convergence as the design, not an accident.**
+
+| Industry rename | PVM primitive | Same machine? |
+|---|---|---|
+| Agent | Process (instance) | Yes |
+| Harness / runner | Host + replay engine | Yes |
+| Multi-agent parallel | Concurrent processes in one world | Yes |
+| Subagent | Child process (sub-orchestration) | Yes |
+| Subagent “sandbox explore” | **Forked world (CoW / branch)** as a subprocess of exploration | Yes — different isolation grain |
+| Tool / LLM call | Syscall (activity) | Yes |
+| Agent memory | Memory (KV / tables / optional vectors) | Yes |
+| Trace / observability | Journal + admin introspection | Yes |
+
+**Parallel agents are not a special mode.**  
+They are processes scheduled against the same queues and locks.
+
+**Subagents are not a special runtime.**  
+They are either:
+
+| Isolation need | Mechanism |
+|---|---|
+| Structured hierarchy, shared world state | Child process (sub-orchestration) in the **same** world |
+| Speculative explore / resolve / discard without poisoning primary | **World fork** (copy-on-write / branch / file clone) — a subprocess of the *world*, not only of the process tree |
+| OS crash domain / sandbox | Optional host OS subprocess running the same PVM against same or forked world |
+
+So: **db fork (CoW) and subagents are the same idea at two grains** —
+
+- **process-grain subprocess** = child instance in-world  
+- **world-grain subprocess** = forked durable computer for explore/solve/merge-or-discard  
+
+Current agent frameworks reimplement weak versions of both (threads, child chats, scratchpads) **outside** a single ACID journaled machine. The PVM makes them first-class and durable.
+
 ---
 
 ## 2. What this is / is not
@@ -280,7 +349,7 @@ All topologies preserve the same process/syscall model.
 
 ## 8. Naming map (optional renames)
 
-Use kernel names in specs and code. Product names are projections.
+Use kernel names in specs and code. Product names are projections **of the same machine**, not extra layers.
 
 | Product / colloquial | Kernel name |
 |---|---|
@@ -288,9 +357,12 @@ Use kernel names in specs and code. Product names are projections.
 | Harness / runner | Host + replay engine |
 | Tool / LLM call | Syscall (activity) |
 | Memory | Memory (KV and/or app tables) |
-| Subagent | Child process (sub-orchestration) or separate process instance |
+| Subagent | Child process (sub-orchestration) **or** forked world (CoW explore) |
+| Multi-agent system | Many processes (± many worlds) |
 | Workflow engine | PVM |
 | Database | World medium |
+
+If a design needs a new noun that does not reduce to a kernel primitive, it is probably accidental complexity.
 
 ---
 
@@ -369,13 +441,16 @@ Policies (examples):
 
 ### Phase 5 — Fork and time travel
 
-**Unlock:** worlds are experimentally branchable.
+**Unlock:** worlds are experimentally branchable — **world-grain subprocesses**.
 
 - Export journal prefix to event N into a new world file
 - Fork for what-if execution without destroying primary
+- Explore / resolve / discard as first-class ops (merge policy optional and explicit)
 - Optional content-addressed activity memoization
 
-**Exit criteria:** create a branch world from a historical point and run alternate syscalls safely.
+This is the durable form of “spawn a subagent to try something”: not a side chat, a **forked computer**.
+
+**Exit criteria:** create a branch world from a historical point and run alternate syscalls safely; discard or promote results without corrupting the parent world.
 
 ### Phase 6 — Adaptive policy
 
@@ -477,6 +552,8 @@ If a proposal needs “agent memory policy,” “tool sandbox,” or “prompt 
 ## 15. One-sentence summary
 
 **`libsql-durable` is the durable kernel-state layer of a log-structured process virtual machine whose entire world can live in one libSQL file—and whose CPU can be thrown away at any time.**
+
+**Corollary:** agent frameworks are converging on this machine whether they know it or not; processes, syscalls, shared state, and forked exploration are not features to layer on later — they **are** the PVM.
 
 ---
 
