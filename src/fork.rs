@@ -24,6 +24,42 @@ pub struct ForkOptions {
     pub clear_scheduler_state: bool,
 }
 
+impl ForkOptions {
+    /// Default explore sandbox: clear scheduler state, note `"explore"`.
+    pub fn explore() -> Self {
+        Self {
+            note: Some("explore".into()),
+            clear_scheduler_state: true,
+            ..Default::default()
+        }
+    }
+
+    /// Explore focused on one instance (retain only that instance's rows).
+    pub fn explore_instance(instance_id: impl Into<String>) -> Self {
+        Self {
+            note: Some("explore".into()),
+            keep_instance: Some(instance_id.into()),
+            clear_scheduler_state: true,
+            ..Default::default()
+        }
+    }
+
+    /// Time-travel cut: keep events with `event_id <= after`, clear scheduler.
+    pub fn time_travel(after_event_id: u64) -> Self {
+        Self {
+            note: Some("time-travel".into()),
+            truncate_after_event_id: Some(after_event_id),
+            clear_scheduler_state: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkResult {
     pub parent_world_id: String,
@@ -143,12 +179,24 @@ impl NativeLibsqlProvider {
             "DELETE FROM orchestrator_queue WHERE instance_id IS NOT NULL AND instance_id != ?1",
             "DELETE FROM worker_queue WHERE instance_id IS NOT NULL AND instance_id != ?1",
             "DELETE FROM instance_locks WHERE instance_id != ?1",
+            // Best-effort: pins table may not exist on ancient worlds.
+            "DELETE FROM process_definition_pins WHERE instance_id != ?1",
         ] {
-            conn.execute(sql, params![instance_id])
-                .await
-                .map_err(|e| Self::libsql_to_provider_error("retain_instance_only", e))?;
+            let _ = conn.execute(sql, params![instance_id]).await;
         }
         Ok(())
+    }
+
+    /// Fork and open the child as a live provider (explore convenience).
+    pub async fn fork_and_open(
+        &self,
+        src_db: impl AsRef<Path>,
+        dst_db: impl AsRef<Path>,
+        options: ForkOptions,
+    ) -> Result<(ForkResult, LibsqlProvider), LibsqlProviderInitError> {
+        let result = self.fork_world_to(src_db, &dst_db, options).await?;
+        let child = LibsqlProvider::new(LibsqlDatabaseConfig::local(dst_db.as_ref())).await?;
+        Ok((result, child))
     }
 
     /// Clear queues and locks for a clean explore fork.
@@ -177,4 +225,26 @@ pub fn fork_world_files(
     dst_db: impl AsRef<Path>,
 ) -> Result<WorldPackagePaths, LibsqlProviderInitError> {
     copy_world_package(src_db, dst_db)
+}
+
+/// Delete a local world package (db + wal + shm). Refuses if `path` does not exist as a file.
+pub fn discard_world_package(path: impl AsRef<Path>) -> Result<(), LibsqlProviderInitError> {
+    let paths = WorldPackagePaths::for_db(path.as_ref());
+    if !paths.db.exists() {
+        return Err(LibsqlProviderInitError::InvalidConfig(format!(
+            "discard: world file not found: {}",
+            paths.db.display()
+        )));
+    }
+    for p in [&paths.db, &paths.wal, &paths.shm] {
+        if p.exists() {
+            std::fs::remove_file(p).map_err(|e| {
+                LibsqlProviderInitError::InvalidConfig(format!(
+                    "discard {}: {e}",
+                    p.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }

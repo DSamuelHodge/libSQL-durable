@@ -18,7 +18,8 @@ use duroxide::runtime;
 use duroxide::runtime::registry::{ActivityRegistry, OrchestrationRegistry};
 use duroxide::{ActivityContext, Client, OrchestrationContext};
 use libsql_durable::{
-    HealOptions, LibsqlDatabaseConfig, LibsqlProvider, SCHEMA_VERSION, WORLD_FORMAT_VERSION,
+    interpreted_orchestrations, wrap_interpret_input, HealOptions, LibsqlDatabaseConfig,
+    LibsqlProvider, INTERPRETED_ORCH_NAME, SCHEMA_VERSION, WORLD_FORMAT_VERSION,
 };
 
 #[derive(Debug, Parser)]
@@ -116,6 +117,35 @@ enum Commands {
         /// Input string passed to Echo.
         input: String,
         /// Wait for completion (seconds). 0 = fire-and-forget then exit after start.
+        #[arg(long, default_value_t = 30)]
+        wait_secs: u64,
+    },
+    /// Put a process definition into the world (immutable version).
+    DefPut {
+        #[command(flatten)]
+        world: WorldArgs,
+        name: String,
+        version: String,
+        /// Path to JSON body file, or `-` for stdin.
+        body_file: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// List process definitions.
+    DefList {
+        #[command(flatten)]
+        world: WorldArgs,
+    },
+    /// Start `pvm.interpret` with a stored definition name@version.
+    Interpret {
+        #[command(flatten)]
+        world: WorldArgs,
+        /// Definition as `Name@Version`.
+        definition: String,
+        /// Process input string.
+        input: String,
+        #[arg(long)]
+        instance: Option<String>,
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
     },
@@ -271,6 +301,41 @@ async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             input,
             wait_secs,
         } => cmd_start(world, instance, input, wait_secs).await,
+        Commands::DefPut {
+            world,
+            name,
+            version,
+            body_file,
+            force,
+        } => {
+            let body = if body_file.as_os_str() == "-" {
+                use std::io::Read;
+                let mut s = String::new();
+                std::io::stdin().read_to_string(&mut s)?;
+                s
+            } else {
+                std::fs::read_to_string(&body_file)?
+            };
+            let p = open_provider(&world).await?;
+            p.put_process_definition_ex(&name, &version, body.trim(), force)
+                .await?;
+            println!("stored definition {name}@{version}");
+            Ok(())
+        }
+        Commands::DefList { world } => {
+            let p = open_provider(&world).await?;
+            for d in p.list_process_definitions().await? {
+                println!("{name}@{ver}", name = d.name, ver = d.version);
+            }
+            Ok(())
+        }
+        Commands::Interpret {
+            world,
+            definition,
+            input,
+            instance,
+            wait_secs,
+        } => cmd_interpret(world, definition, input, instance, wait_secs).await,
     }
 }
 
@@ -318,8 +383,7 @@ fn stock_activities() -> ActivityRegistry {
 /// Stock process: schedule `echo` with input and return the result.
 fn stock_orchestrations() -> OrchestrationRegistry {
     let echo_orch = |ctx: OrchestrationContext, input: String| async move {
-        let out = ctx.schedule_activity("echo", input).await?;
-        Ok(out)
+        ctx.schedule_activity("echo", input).await
     };
     OrchestrationRegistry::builder()
         .register("Echo", echo_orch)
@@ -350,11 +414,12 @@ async fn cmd_run(
 
     let store: Arc<dyn duroxide::providers::Provider> = provider.clone();
     let activities = stock_activities();
-    let orchestrations = stock_orchestrations();
+    // Long-lived host: interpreted definitions + Echo.
+    let orchestrations = host_orchestrations_with_interpret();
     let rt = runtime::Runtime::start_with_store(store, activities, orchestrations).await;
 
     println!(
-        "pvm run: world ready (schema={SCHEMA_VERSION}); stock processes: Echo; syscalls: echo, sleep_ms"
+        "pvm run: world ready (schema={SCHEMA_VERSION}); processes: Echo, {INTERPRETED_ORCH_NAME}; syscalls: echo, sleep_ms"
     );
     println!("press Ctrl-C to shutdown");
 
@@ -378,36 +443,96 @@ async fn cmd_start(
     let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store);
 
-    let instance_id = instance.unwrap_or_else(|| {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        format!("echo-{ms}")
-    });
+    let instance_id = instance.unwrap_or_else(|| auto_id("echo"));
 
     client
         .start_orchestration(&instance_id, "Echo", input)
         .await
         .map_err(|e| format!("start: {e:?}"))?;
     println!("started instance={instance_id} process=Echo");
-
-    if wait_secs > 0 {
-        match client
-            .wait_for_orchestration(&instance_id, Duration::from_secs(wait_secs))
-            .await
-            .map_err(|e| format!("wait: {e:?}"))?
-        {
-            duroxide::OrchestrationStatus::Completed { output, .. } => {
-                println!("completed output={output}");
-            }
-            duroxide::OrchestrationStatus::Failed { details, .. } => {
-                println!("failed: {}", details.display_message());
-            }
-            other => println!("status={other:?}"),
-        }
-    }
-
+    wait_status(&client, &instance_id, wait_secs).await?;
     rt.shutdown(Some(5_000)).await;
     Ok(())
+}
+
+async fn cmd_interpret(
+    world: WorldArgs,
+    definition: String,
+    input: String,
+    instance: Option<String>,
+    wait_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (name, version) = definition.split_once('@').ok_or_else(|| {
+        "definition must be Name@Version (e.g. Demo@1.0.0)".to_string()
+    })?;
+    let provider = Arc::new(open_provider(&world).await?);
+    let def = provider
+        .get_process_definition(name, version)
+        .await?
+        .ok_or_else(|| format!("definition {name}@{version} not found"))?;
+    let payload = wrap_interpret_input(&def.body_json, &input)?;
+
+    let store: Arc<dyn duroxide::providers::Provider> = provider.clone();
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        stock_activities(),
+        interpreted_orchestrations(),
+    )
+    .await;
+    let client = Client::new(store);
+    let instance_id = instance.unwrap_or_else(|| auto_id("interp"));
+    provider
+        .pin_process_definition(&instance_id, name, version)
+        .await?;
+    client
+        .start_orchestration(&instance_id, INTERPRETED_ORCH_NAME, payload)
+        .await
+        .map_err(|e| format!("start: {e:?}"))?;
+    println!("started instance={instance_id} process={INTERPRETED_ORCH_NAME} def={name}@{version}");
+    wait_status(&client, &instance_id, wait_secs).await?;
+    rt.shutdown(Some(5_000)).await;
+    Ok(())
+}
+
+fn auto_id(prefix: &str) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{prefix}-{ms}")
+}
+
+async fn wait_status(
+    client: &Client,
+    instance_id: &str,
+    wait_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if wait_secs == 0 {
+        return Ok(());
+    }
+    match client
+        .wait_for_orchestration(instance_id, Duration::from_secs(wait_secs))
+        .await
+        .map_err(|e| format!("wait: {e:?}"))?
+    {
+        duroxide::OrchestrationStatus::Completed { output, .. } => {
+            println!("completed output={output}");
+        }
+        duroxide::OrchestrationStatus::Failed { details, .. } => {
+            println!("failed: {}", details.display_message());
+        }
+        other => println!("status={other:?}"),
+    }
+    Ok(())
+}
+
+/// Echo + pvm.interpret for long-lived `pvm run`.
+fn host_orchestrations_with_interpret() -> OrchestrationRegistry {
+    let echo_orch = |ctx: OrchestrationContext, input: String| async move {
+        ctx.schedule_activity("echo", input).await
+    };
+    let base = interpreted_orchestrations();
+    OrchestrationRegistry::builder_from(&base)
+        .register("Echo", echo_orch)
+        .build()
 }

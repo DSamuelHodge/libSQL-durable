@@ -22,6 +22,8 @@ mod fork;
 #[cfg(feature = "native-libsql")]
 mod heal;
 #[cfg(feature = "native-libsql")]
+mod interpreter;
+#[cfg(feature = "native-libsql")]
 mod introspect;
 #[cfg(feature = "native-libsql")]
 mod mesh;
@@ -38,9 +40,15 @@ pub use duroxide;
 #[cfg(feature = "compat-sqlite")]
 pub use compat::CompatSqliteProvider;
 #[cfg(feature = "native-libsql")]
-pub use definitions::{ProcessDefinition, ProcessDefinitionPin};
+pub use definitions::{
+    validate_definition_body, ProcessDefinition, ProcessDefinitionPin, PVM_DEF_V1,
+};
 #[cfg(feature = "native-libsql")]
-pub use fork::{fork_world_files, ForkOptions, ForkResult};
+pub use interpreter::{
+    interpreted_orchestrations, wrap_interpret_input, INTERPRETED_ORCH_NAME,
+};
+#[cfg(feature = "native-libsql")]
+pub use fork::{discard_world_package, fork_world_files, ForkOptions, ForkResult};
 #[cfg(feature = "native-libsql")]
 pub use heal::{
     HealActionResult, HealOptions, HealReport, HealingAuditRow, DEFAULT_RUNAWAY_HISTORY_EVENTS,
@@ -353,7 +361,7 @@ impl LibsqlProvider {
 
     // --- Phase 4: process definitions as data ---
 
-    /// Upsert a process definition (name, version) → JSON body.
+    /// Insert a process definition. Same `(name, version)` is immutable.
     #[cfg(feature = "native-libsql")]
     pub async fn put_process_definition(
         &self,
@@ -365,6 +373,24 @@ impl LibsqlProvider {
             Self::Native(provider) => {
                 provider
                     .put_process_definition(name, version, body_json)
+                    .await
+            }
+        }
+    }
+
+    /// Insert or force-replace a process definition.
+    #[cfg(feature = "native-libsql")]
+    pub async fn put_process_definition_ex(
+        &self,
+        name: &str,
+        version: &str,
+        body_json: &str,
+        force: bool,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .put_process_definition_ex(name, version, body_json, force)
                     .await
             }
         }
@@ -387,6 +413,29 @@ impl LibsqlProvider {
     pub async fn list_process_definitions(&self) -> Result<Vec<ProcessDefinition>, ProviderError> {
         match self {
             Self::Native(provider) => provider.list_process_definitions().await,
+        }
+    }
+
+    /// List definitions for one name (all versions).
+    #[cfg(feature = "native-libsql")]
+    pub async fn list_process_definitions_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Vec<ProcessDefinition>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.list_process_definitions_by_name(name).await,
+        }
+    }
+
+    /// Delete a definition version.
+    #[cfg(feature = "native-libsql")]
+    pub async fn delete_process_definition(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<bool, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.delete_process_definition(name, version).await,
         }
     }
 
@@ -418,6 +467,17 @@ impl LibsqlProvider {
         }
     }
 
+    /// Resolve pin → full definition for an instance.
+    #[cfg(feature = "native-libsql")]
+    pub async fn resolve_definition_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<ProcessDefinition>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.resolve_definition_for_instance(instance_id).await,
+        }
+    }
+
     // --- Phase 5: fork + time travel ---
 
     /// Fork this file-backed world to `dst_db` (world-grain subprocess).
@@ -430,6 +490,19 @@ impl LibsqlProvider {
     ) -> Result<ForkResult, LibsqlProviderInitError> {
         match self {
             Self::Native(provider) => provider.fork_world_to(src_db, dst_db, options).await,
+        }
+    }
+
+    /// Fork and open the child as a live provider.
+    #[cfg(feature = "native-libsql")]
+    pub async fn fork_and_open(
+        &self,
+        src_db: impl AsRef<std::path::Path>,
+        dst_db: impl AsRef<std::path::Path>,
+        options: ForkOptions,
+    ) -> Result<(ForkResult, LibsqlProvider), LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.fork_and_open(src_db, dst_db, options).await,
         }
     }
 

@@ -9,32 +9,31 @@ a **forked computer**.
 ## API
 
 ```rust
-use libsql_durable::{ForkOptions, LibsqlProvider};
+use libsql_durable::{discard_world_package, ForkOptions, LibsqlProvider};
 
-let result = provider
-    .fork_world_to(
-        &src_path,
-        &dst_path,
-        ForkOptions {
-            note: Some("explore alternate path".into()),
-            truncate_after_event_id: Some(42), // keep events ≤ 42
-            keep_instance: None,               // or Some("only-this-instance")
-            clear_scheduler_state: true,       // drop queues/locks/sessions
-        },
-    )
+// Explore preset: clear scheduler, note "explore"
+let (result, child) = provider
+    .fork_and_open(&src_path, &dst_path, ForkOptions::explore())
     .await?;
 
-// result.parent_world_id, result.child_world_id, result.child_path
+// Or time-travel / single-instance:
+// ForkOptions::time_travel(42)
+// ForkOptions::explore_instance("inst-1")
+
+// Discard child package when done exploring
+discard_world_package(&dst_path)?;
 ```
 
-Lower-level helpers (also on `LibsqlProvider`):
-
-| Method | Effect |
+| Helper | Effect |
 |---|---|
-| `time_travel_truncate(after, only?)` | `DELETE` history with `event_id > after` |
-| `retain_instance_only(id)` | Drop other instances' rows (explore sandbox) |
-| `clear_scheduler_state()` | Empty queues, locks, sessions |
-| `fork_world_files(src, dst)` | Filesystem copy only (no live provider) |
+| `ForkOptions::explore()` | Clear scheduler + note |
+| `ForkOptions::explore_instance(id)` | Explore + retain one instance |
+| `ForkOptions::time_travel(n)` | Truncate history after event `n` |
+| `fork_and_open` | Fork + return live child provider |
+| `discard_world_package` | Delete db+wal+shm |
+| `time_travel_truncate` / `retain_instance_only` / `clear_scheduler_state` | Lower-level |
+
+**KV after time-travel:** history is cut; KV is left as-is in v1 (document before resume-sensitive explore).
 
 ## Lineage
 
