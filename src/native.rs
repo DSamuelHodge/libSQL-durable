@@ -728,9 +728,12 @@ impl NativeLibsqlProvider {
             env!("CARGO_PKG_VERSION"),
         )
         .await?;
-        // Healing audit/quarantine tables (Phase 3) — best-effort on open.
+        // Phase 3–7 tables — best-effort on open/migrate.
         drop(conn);
         let _ = self.ensure_healing_schema().await;
+        let _ = self.ensure_definitions_schema().await;
+        let _ = self.ensure_policy_schema().await;
+        let _ = self.ensure_mesh_schema().await;
         Ok(())
     }
 

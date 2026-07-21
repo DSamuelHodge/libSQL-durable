@@ -13,7 +13,7 @@
 > and processes/subprocesses/forks as the only concurrency model that matters.
 
 **PVM v1 (ship definition):** Phases **0–3** complete — durable kernel world, world packaging, introspection language, healing policies.  
-**PVM horizon:** Phases **4–7** — definitions as data, fork/time-travel, adaptive policy, world mesh.
+**PVM horizon (Phases 4–7):** **implemented in-tree** — definitions as data, fork/time-travel, adaptive policy, world mesh (`SCHEMA_VERSION` / `WORLD_FORMAT_VERSION` = 2).
 
 Agents, harnesses, and multi-agent products are **not** separate build tracks. They collapse into processes, syscalls, and world forks on this machine.
 
@@ -456,6 +456,8 @@ Policies (examples):
 - Pin `definition_version` on each execution
 - Enable migration of worlds across hosts that share the interpreter contract
 
+**Status: implemented in-tree** — `src/definitions.rs`, [`DEFINITIONS.md`](./DEFINITIONS.md), `tests/horizon.rs`.
+
 **Exit criteria:** change process logic by writing data (with versioning), not only by shipping a new binary—while preserving replay safety.
 
 ### Phase 5 — Fork and time travel
@@ -469,6 +471,8 @@ Policies (examples):
 
 This is the durable form of “spawn a subagent to try something”: not a side chat, a **forked computer**.
 
+**Status: implemented in-tree** — `src/fork.rs`, [`FORK.md`](./FORK.md), `tests/horizon.rs`.
+
 **Exit criteria:** create a branch world from a historical point and run alternate syscalls safely; discard or promote results without corrupting the parent world.
 
 ### Phase 6 — Adaptive policy
@@ -480,6 +484,8 @@ Outputs: lease durations, concurrency caps, retry windows, compaction triggers, 
 
 **Rule:** policy changes are versioned and auditable; adaptation must not break determinism of process control flow (only host scheduling parameters).
 
+**Status: implemented in-tree** — `src/policy.rs`, [`POLICY.md`](./POLICY.md), `tests/horizon.rs`.
+
 ### Phase 7 — World mesh
 
 **Unlock:** many worlds with placement and capability boundaries.
@@ -488,6 +494,8 @@ Outputs: lease durations, concurrency caps, retry windows, compaction triggers, 
 - capability keys per world (encryption)
 - partial sync / selective replica
 - cross-world references by explicit protocol (not hidden shared memory)
+
+**Status: implemented in-tree** — `src/mesh.rs`, [`MESH.md`](./MESH.md), `tests/horizon.rs`.
 
 **Exit criteria:** operate a fleet of worlds with clear isolation and movement semantics.
 
@@ -537,14 +545,14 @@ Design for **many small durable processes**, not one mega-process writing contin
 | Practical patterns | [`COOKBOOK.md`](../COOKBOOK.md) |
 | Runnable process demos | `examples/agent_loop.rs`, `examples/agent_nvidia.rs` (syscalls = activities) |
 
-**Honest position:** **PVM v1 (Phases 0–3) implemented in-tree.** Horizon is Phases 4–7.
+**Honest position:** **PVM v1 (Phases 0–3) and horizon (Phases 4–7) implemented in-tree** (`SCHEMA_VERSION` = 2).
 
 | Target | Scope | Status |
 |---|---|---|
 | **PVM v1** | Phases 0–3 | **Complete** |
-| **PVM horizon** | Phases 4–7 | Next ambitions (definitions-as-data, fork, adaptive, mesh) |
+| **PVM horizon** | Phases 4–7 | **Complete** (definitions-as-data, fork, adaptive, mesh) |
 
-**Phase 1:** [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) · **Phase 2:** [`INTROSPECTION.md`](./INTROSPECTION.md) · **Phase 3:** [`HEALING.md`](./HEALING.md)
+**Phase 1:** [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) · **Phase 2:** [`INTROSPECTION.md`](./INTROSPECTION.md) · **Phase 3:** [`HEALING.md`](./HEALING.md) · **Phase 4:** [`DEFINITIONS.md`](./DEFINITIONS.md) · **Phase 5:** [`FORK.md`](./FORK.md) · **Phase 6:** [`POLICY.md`](./POLICY.md) · **Phase 7:** [`MESH.md`](./MESH.md)
 
 ---
 

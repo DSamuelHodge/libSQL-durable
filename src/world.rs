@@ -18,10 +18,13 @@ use crate::LibsqlProviderInitError;
 
 /// Kernel / orchestration schema revision applied by migrate.
 /// Bump when making backward-compatible DDL additions.
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// - 1: base durable kernel + world_manifest
+/// - 2: definitions, fork metadata, adaptive policy, world mesh tables
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// World packaging format version (independent of orchestration schema version).
-pub const WORLD_FORMAT_VERSION: i64 = 1;
+pub const WORLD_FORMAT_VERSION: i64 = 2;
 
 /// Oldest schema version this host will open (after migrate).
 pub const MIN_COMPATIBLE_SCHEMA_VERSION: i64 = 1;
@@ -40,6 +43,10 @@ pub struct WorldManifest {
     pub runtime_semver_min: String,
     /// Semver upper bound (informational; hard fence uses schema_version).
     pub runtime_semver_max: String,
+    /// If this world was forked, parent world_id (Phase 5).
+    pub parent_world_id: Option<String>,
+    /// Optional human/system note about the fork.
+    pub fork_note: Option<String>,
 }
 
 /// Result of opening / validating a world (checklist snapshot).
@@ -228,12 +235,24 @@ pub async fn ensure_world_manifest(
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             runtime_semver_min TEXT NOT NULL,
-            runtime_semver_max TEXT NOT NULL
+            runtime_semver_max TEXT NOT NULL,
+            parent_world_id TEXT,
+            fork_note TEXT
         )
         "#,
         (),
     )
     .await?;
+    // Additive columns for worlds created on format v1.
+    let _ = conn
+        .execute(
+            "ALTER TABLE world_manifest ADD COLUMN parent_world_id TEXT",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("ALTER TABLE world_manifest ADD COLUMN fork_note TEXT", ())
+        .await;
 
     // Fence against a future schema already recorded in schema_meta (if any).
     if let Some(found) = read_schema_meta_version(conn).await? {
@@ -244,7 +263,8 @@ pub async fn ensure_world_manifest(
         .query(
             r#"
             SELECT world_id, schema_version, world_format_version, provider_name, provider_version,
-                   created_at_ms, updated_at_ms, runtime_semver_min, runtime_semver_max
+                   created_at_ms, updated_at_ms, runtime_semver_min, runtime_semver_max,
+                   parent_world_id, fork_note
             FROM world_manifest WHERE id = 1
             "#,
             (),
@@ -257,6 +277,9 @@ pub async fn ensure_world_manifest(
         check_format_fence(format_v)?;
         let schema_v = row.get::<i64>(1)?;
         check_schema_fence(schema_v)?;
+
+        let parent_world_id = optional_text(row.get_value(9).ok());
+        let fork_note = optional_text(row.get_value(10).ok());
 
         // Refresh host stamp; advance schema_version to this host after migrate.
         conn.execute(
@@ -291,6 +314,8 @@ pub async fn ensure_world_manifest(
             updated_at_ms: now,
             runtime_semver_min: row.get::<String>(7)?,
             runtime_semver_max: env!("CARGO_PKG_VERSION").to_string(),
+            parent_world_id,
+            fork_note,
         });
     }
 
@@ -301,8 +326,8 @@ pub async fn ensure_world_manifest(
         INSERT INTO world_manifest (
             id, world_id, schema_version, world_format_version,
             provider_name, provider_version, created_at_ms, updated_at_ms,
-            runtime_semver_min, runtime_semver_max
-        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            runtime_semver_min, runtime_semver_max, parent_world_id, fork_note
+        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)
         "#,
         params![
             world_id.as_str(),
@@ -328,7 +353,16 @@ pub async fn ensure_world_manifest(
         updated_at_ms: now,
         runtime_semver_min: ver.to_string(),
         runtime_semver_max: ver.to_string(),
+        parent_world_id: None,
+        fork_note: None,
     })
+}
+
+fn optional_text(value: Option<libsql::Value>) -> Option<String> {
+    match value {
+        Some(libsql::Value::Text(s)) => Some(s),
+        _ => None,
+    }
 }
 
 pub async fn read_world_manifest(
@@ -338,7 +372,8 @@ pub async fn read_world_manifest(
         .query(
             r#"
             SELECT world_id, schema_version, world_format_version, provider_name, provider_version,
-                   created_at_ms, updated_at_ms, runtime_semver_min, runtime_semver_max
+                   created_at_ms, updated_at_ms, runtime_semver_min, runtime_semver_max,
+                   parent_world_id, fork_note
             FROM world_manifest WHERE id = 1
             "#,
             (),
@@ -365,9 +400,39 @@ pub async fn read_world_manifest(
             updated_at_ms: row.get::<i64>(6)?,
             runtime_semver_min: row.get::<String>(7)?,
             runtime_semver_max: row.get::<String>(8)?,
+            parent_world_id: optional_text(row.get_value(9).ok()),
+            fork_note: optional_text(row.get_value(10).ok()),
         })),
         None => Ok(None),
     }
+}
+
+/// Stamp fork lineage on an already-copied world (Phase 5).
+pub async fn stamp_fork_lineage(
+    conn: &libsql::Connection,
+    parent_world_id: &str,
+    fork_note: Option<&str>,
+) -> Result<(), LibsqlProviderInitError> {
+    let now = now_millis();
+    let new_id = new_world_id();
+    conn.execute(
+        r#"
+        UPDATE world_manifest SET
+            world_id = ?1,
+            parent_world_id = ?2,
+            fork_note = ?3,
+            updated_at_ms = ?4
+        WHERE id = 1
+        "#,
+        params![
+            new_id,
+            parent_world_id,
+            fork_note.unwrap_or("fork"),
+            now
+        ],
+    )
+    .await?;
+    Ok(())
 }
 
 async fn read_schema_meta_version(

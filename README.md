@@ -14,9 +14,9 @@ but it is not an acceptance gate for this crate.
 multi-tenant, day-2 ops, durable process demos).
 
 **Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
-We are finishing a durable process kernel (world + journal + syscalls), not only a storage adapter.  
-**PVM v1 (phases 0–3) complete:**  
-[World packaging](./docs/WORLD_PACKAGE.md) · [Introspection](./docs/INTROSPECTION.md) · [Healing](./docs/HEALING.md) · [PVM spec](./docs/PVM.md)
+Durable process kernel (world + journal + syscalls), not only a storage adapter.  
+**PVM v1 (0–3) + horizon (4–7) complete** (`SCHEMA_VERSION` = 2):  
+[World packaging](./docs/WORLD_PACKAGE.md) · [Introspection](./docs/INTROSPECTION.md) · [Healing](./docs/HEALING.md) · [Definitions](./docs/DEFINITIONS.md) · [Fork](./docs/FORK.md) · [Policy](./docs/POLICY.md) · [Mesh](./docs/MESH.md) · [PVM spec](./docs/PVM.md)
 
 **Runnable process demos:**
 

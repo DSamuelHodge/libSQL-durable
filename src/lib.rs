@@ -16,11 +16,19 @@ mod config;
 #[cfg(feature = "compat-sqlite")]
 mod compat;
 #[cfg(feature = "native-libsql")]
+mod definitions;
+#[cfg(feature = "native-libsql")]
+mod fork;
+#[cfg(feature = "native-libsql")]
 mod heal;
 #[cfg(feature = "native-libsql")]
 mod introspect;
 #[cfg(feature = "native-libsql")]
+mod mesh;
+#[cfg(feature = "native-libsql")]
 mod native;
+#[cfg(feature = "native-libsql")]
+mod policy;
 #[cfg(feature = "native-libsql")]
 mod world;
 
@@ -29,6 +37,10 @@ pub use duroxide;
 
 #[cfg(feature = "compat-sqlite")]
 pub use compat::CompatSqliteProvider;
+#[cfg(feature = "native-libsql")]
+pub use definitions::{ProcessDefinition, ProcessDefinitionPin};
+#[cfg(feature = "native-libsql")]
+pub use fork::{fork_world_files, ForkOptions, ForkResult};
 #[cfg(feature = "native-libsql")]
 pub use heal::{
     HealActionResult, HealOptions, HealReport, HealingAuditRow, DEFAULT_RUNAWAY_HISTORY_EVENTS,
@@ -39,7 +51,11 @@ pub use introspect::{
     WorldHealth, DEFAULT_POISON_ATTEMPT_THRESHOLD,
 };
 #[cfg(feature = "native-libsql")]
+pub use mesh::{MeshStatus, WorldPeer, WorldRef};
+#[cfg(feature = "native-libsql")]
 pub use native::{NativeLibsqlProvider, ProviderTuning};
+#[cfg(feature = "native-libsql")]
+pub use policy::{PolicyAuditRow, RuntimePolicy};
 #[cfg(feature = "native-libsql")]
 pub use world::{
     copy_world_package, open_world_checklist, WorldManifest, WorldOpenReport, WorldPackagePaths,
@@ -332,6 +348,228 @@ impl LibsqlProvider {
     pub async fn healing_quarantine_count(&self) -> Result<u64, ProviderError> {
         match self {
             Self::Native(provider) => provider.healing_quarantine_count().await,
+        }
+    }
+
+    // --- Phase 4: process definitions as data ---
+
+    /// Upsert a process definition (name, version) → JSON body.
+    #[cfg(feature = "native-libsql")]
+    pub async fn put_process_definition(
+        &self,
+        name: &str,
+        version: &str,
+        body_json: &str,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .put_process_definition(name, version, body_json)
+                    .await
+            }
+        }
+    }
+
+    /// Fetch a process definition by name and version.
+    #[cfg(feature = "native-libsql")]
+    pub async fn get_process_definition(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<ProcessDefinition>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.get_process_definition(name, version).await,
+        }
+    }
+
+    /// List all stored process definitions.
+    #[cfg(feature = "native-libsql")]
+    pub async fn list_process_definitions(&self) -> Result<Vec<ProcessDefinition>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.list_process_definitions().await,
+        }
+    }
+
+    /// Pin an instance to a definition version.
+    #[cfg(feature = "native-libsql")]
+    pub async fn pin_process_definition(
+        &self,
+        instance_id: &str,
+        definition_name: &str,
+        definition_version: &str,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .pin_process_definition(instance_id, definition_name, definition_version)
+                    .await
+            }
+        }
+    }
+
+    /// Get the definition pin for an instance, if any.
+    #[cfg(feature = "native-libsql")]
+    pub async fn get_process_definition_pin(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<ProcessDefinitionPin>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.get_process_definition_pin(instance_id).await,
+        }
+    }
+
+    // --- Phase 5: fork + time travel ---
+
+    /// Fork this file-backed world to `dst_db` (world-grain subprocess).
+    #[cfg(feature = "native-libsql")]
+    pub async fn fork_world_to(
+        &self,
+        src_db: impl AsRef<std::path::Path>,
+        dst_db: impl AsRef<std::path::Path>,
+        options: ForkOptions,
+    ) -> Result<ForkResult, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.fork_world_to(src_db, dst_db, options).await,
+        }
+    }
+
+    /// Delete history events with event_id greater than `after_event_id`.
+    #[cfg(feature = "native-libsql")]
+    pub async fn time_travel_truncate(
+        &self,
+        after_event_id: u64,
+        only_instance: Option<&str>,
+    ) -> Result<u64, ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .time_travel_truncate(after_event_id, only_instance)
+                    .await
+            }
+        }
+    }
+
+    /// Keep one instance's rows; delete others (explore sandbox).
+    #[cfg(feature = "native-libsql")]
+    pub async fn retain_instance_only(&self, instance_id: &str) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => provider.retain_instance_only(instance_id).await,
+        }
+    }
+
+    /// Clear queues and locks for a clean explore fork.
+    #[cfg(feature = "native-libsql")]
+    pub async fn clear_scheduler_state(&self) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => provider.clear_scheduler_state().await,
+        }
+    }
+
+    // --- Phase 6: adaptive runtime policy ---
+
+    /// Current runtime policy (defaults persisted on first read).
+    #[cfg(feature = "native-libsql")]
+    pub async fn get_runtime_policy(&self) -> Result<RuntimePolicy, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.get_runtime_policy().await,
+        }
+    }
+
+    /// Set runtime policy and append an audit row.
+    #[cfg(feature = "native-libsql")]
+    pub async fn set_runtime_policy(
+        &self,
+        policy: &RuntimePolicy,
+        source: &str,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => provider.set_runtime_policy(policy, source).await,
+        }
+    }
+
+    /// Adjust policy from observed health/queue pressure (bounded heuristics).
+    #[cfg(feature = "native-libsql")]
+    pub async fn adapt_policy_from_health(&self) -> Result<RuntimePolicy, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.adapt_policy_from_health().await,
+        }
+    }
+
+    /// Recent policy audit log (newest first).
+    #[cfg(feature = "native-libsql")]
+    pub async fn policy_audit_log(&self, limit: u32) -> Result<Vec<PolicyAuditRow>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.policy_audit_log(limit).await,
+        }
+    }
+
+    // --- Phase 7: world mesh ---
+
+    /// Register or update a mesh peer.
+    #[cfg(feature = "native-libsql")]
+    pub async fn register_mesh_peer(
+        &self,
+        peer_world_id: &str,
+        endpoint: &str,
+        role: &str,
+        meta_json: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .register_mesh_peer(peer_world_id, endpoint, role, meta_json)
+                    .await
+            }
+        }
+    }
+
+    /// List registered mesh peers.
+    #[cfg(feature = "native-libsql")]
+    pub async fn list_mesh_peers(&self) -> Result<Vec<WorldPeer>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.list_mesh_peers().await,
+        }
+    }
+
+    /// Add an explicit cross-world reference.
+    #[cfg(feature = "native-libsql")]
+    pub async fn add_world_ref(
+        &self,
+        local_instance_id: &str,
+        remote_world_id: &str,
+        remote_instance_id: &str,
+        note: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .add_world_ref(
+                        local_instance_id,
+                        remote_world_id,
+                        remote_instance_id,
+                        note,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// List cross-world refs (optionally filtered by local instance).
+    #[cfg(feature = "native-libsql")]
+    pub async fn list_world_refs(
+        &self,
+        local_instance_id: Option<&str>,
+    ) -> Result<Vec<WorldRef>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.list_world_refs(local_instance_id).await,
+        }
+    }
+
+    /// Mesh summary: local world id, peer count, ref count, peers.
+    #[cfg(feature = "native-libsql")]
+    pub async fn mesh_status(&self) -> Result<MeshStatus, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.mesh_status().await,
         }
     }
 
