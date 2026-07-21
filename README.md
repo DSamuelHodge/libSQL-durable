@@ -18,6 +18,23 @@ Durable process kernel (world + journal + syscalls), not only a storage adapter.
 **PVM v1 (0–3) + horizon (4–7) complete** (`SCHEMA_VERSION` = 2):  
 [World packaging](./docs/WORLD_PACKAGE.md) · [Introspection](./docs/INTROSPECTION.md) · [Healing](./docs/HEALING.md) · [Definitions](./docs/DEFINITIONS.md) · [Fork](./docs/FORK.md) · [Policy](./docs/POLICY.md) · [Mesh](./docs/MESH.md) · [PVM spec](./docs/PVM.md)
 
+**One-binary host (`pvm`):** open a world file, inspect/heal, or run stock syscalls — see [`docs/RUNTIME.md`](./docs/RUNTIME.md).  
+**Collapse finish line:** [`docs/COLLAPSE_PR_PLAN.md`](./docs/COLLAPSE_PR_PLAN.md).
+
+```sh
+# Ops (no long-lived worker needed)
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  health --world ./world.db
+
+# Stock Echo process (short-lived host)
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  start --world ./world.db "hello"
+
+# Long-lived host until Ctrl-C
+cargo run --bin pvm --no-default-features --features native-libsql -- \
+  run --world ./world.db
+```
+
 **Runnable process demos:**
 
 ```sh
