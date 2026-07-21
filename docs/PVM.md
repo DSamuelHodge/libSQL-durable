@@ -1,3 +1,8 @@
+---
+title: "PVM architecture"
+description: "Process Virtual Machine thesis, invariants, and phase map."
+---
+
 # Process Virtual Machine (PVM) Spec
 
 **Status:** architectural thesis + **active build target**  

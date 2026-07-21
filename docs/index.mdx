@@ -1,0 +1,50 @@
+---
+title: Introduction
+description: Durable process kernel for Duroxide — one world file, disposable host, journal as truth.
+---
+
+**libsql-durable** is the durable kernel-state layer of a log-structured **Process Virtual Machine (PVM)** whose entire world can live in one libSQL file — and whose CPU can be thrown away at any time.
+
+## One sentence
+
+> Open one world file → the whole machine is there: processes, schedule, memory, durability, ops, fork/explore, and promote.
+
+## Start here
+
+| Topic | Link |
+|---|---|
+| Why anyone should care | [Audiences & use cases](/why) |
+| Architecture thesis | [PVM](/PVM) |
+| One-binary host | [Runtime (`pvm`)](/RUNTIME) |
+| Practical recipes | [Cookbook](/cookbook) |
+| Fork / promote | [Fork](/FORK) |
+| Definitions IR | [Definitions](/DEFINITIONS) |
+
+## Install (Rust crate)
+
+```toml
+[dependencies]
+libsql-durable = { git = "https://github.com/DSamuelHodge/libSQL-durable", default-features = false, features = ["native-libsql"] }
+duroxide = "0.1.29"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+```sh
+# Host binary
+cargo run --bin pvm --no-default-features --features native-libsql -- health --world ./world.db
+```
+
+## Docs site (this site)
+
+Built with [Blume](https://useblume.dev) — local search (Orama), static HTML, AI-ready `llms.txt`.
+
+```sh
+npm install
+npm run docs:dev      # hot reload
+npm run docs:build    # static dist/ + search index
+npm run docs:preview
+```
+
+## Version
+
+**0.2.0** — PVM kernel + collapse finish line. See [Changelog](/changelog).

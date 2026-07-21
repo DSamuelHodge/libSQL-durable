@@ -1,3 +1,8 @@
+---
+title: "Introspection"
+description: "ps, next, why_blocked, trace, queues, health."
+---
+
 # Introspection Language (PVM Phase 2)
 
 Stable operator projections over kernel state. Goal: debug stuck work without

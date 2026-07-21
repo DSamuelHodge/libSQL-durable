@@ -1,3 +1,8 @@
+---
+title: "Collapse PR plan"
+description: "Finish-line PR DAG for one-file PVM."
+---
+
 # PR Plan: Finish the Collapse (libsql-durable)
 
 **Repo:** `/Users/derrickhodge/projects/libsql-durable`  

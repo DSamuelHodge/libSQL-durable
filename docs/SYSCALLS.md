@@ -1,3 +1,8 @@
+---
+title: "Syscalls"
+description: "Activities as the thin non-determinism boundary."
+---
+
 # Syscalls (Activities)
 
 **Rule:** non-determinism enters only through activities. The world journals

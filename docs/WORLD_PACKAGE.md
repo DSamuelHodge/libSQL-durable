@@ -1,3 +1,8 @@
+---
+title: "World package"
+description: "Portable durable computer layout, manifest, and version fence."
+---
+
 # World Package (PVM Phase 1)
 
 A **world package** is the portable unit of durable compute: one libSQL database

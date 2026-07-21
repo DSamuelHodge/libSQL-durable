@@ -1,3 +1,8 @@
+---
+title: "Definitions as data"
+description: "process_definitions, pins, and pvm.def.v1 IR."
+---
+
 # Process Definitions as Data (PVM Phase 4)
 
 Process graphs live in the world (tables), not only in host Rust registries.

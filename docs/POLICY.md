@@ -1,3 +1,8 @@
+---
+title: "Adaptive policy"
+description: "Runtime knobs and health-driven adaptation."
+---
+
 # Adaptive Runtime Policy (PVM Phase 6)
 
 Policy parameters are stored in the world and can be updated from observed

@@ -11,3 +11,9 @@ sqld-data/
 .env
 .env.*
 !.env.example
+
+# Blume docs site
+node_modules/
+.blume/
+.blume-verify/
+dist/

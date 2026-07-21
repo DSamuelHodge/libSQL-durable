@@ -1,3 +1,8 @@
+---
+title: "Fork, explore, promote"
+description: "World-grain subprocess, discard, promote A/B."
+---
+
 # World Fork and Time Travel (PVM Phase 5)
 
 Fork = **world-grain subprocess**: copy the durable computer, optionally trim

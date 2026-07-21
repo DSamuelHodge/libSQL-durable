@@ -1,3 +1,8 @@
+---
+title: "Healing"
+description: "Closed-loop recovery policies and audit log."
+---
+
 # Healing Policies (PVM Phase 3)
 
 Closed-loop recovery for common failure classes. Every mutating heal action is

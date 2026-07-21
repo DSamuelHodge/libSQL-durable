@@ -16,6 +16,16 @@ but it is not an acceptance gate for this crate.
 (local, multi-worker `sqld`, embedded replica, offline sync, encryption,
 multi-tenant, day-2 ops, durable process demos).
 
+**Docs site (Blume):** Markdown in `docs/` → static site with local search.
+
+```sh
+npm install
+npm run docs:dev       # http://localhost:3000 (default)
+npm run docs:build     # dist/ + Orama search index
+npm run docs:preview
+npm run docs:doctor    # config / content diagnostics
+```
+
 **Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
 Durable process kernel (world + journal + syscalls), not only a storage adapter.  
 **PVM kernel (0–7) + collapse finish line complete** (`SCHEMA_VERSION` = 2):  

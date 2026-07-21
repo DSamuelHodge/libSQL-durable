@@ -1,3 +1,8 @@
+---
+title: "World mesh"
+description: "Peers and explicit cross-world references."
+---
+
 # World Mesh (PVM Phase 7)
 
 Many worlds with explicit peers and cross-world references. **No hidden shared

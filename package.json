@@ -1,0 +1,20 @@
+{
+  "name": "libsql-durable-docs",
+  "private": true,
+  "description": "Blume documentation site for libsql-durable (PVM)",
+  "scripts": {
+    "docs:dev": "blume dev",
+    "docs:build": "blume build",
+    "docs:preview": "blume preview",
+    "docs:check": "blume check",
+    "docs:doctor": "blume doctor",
+    "docs:validate": "blume validate",
+    "docs:audit": "blume build && blume audit"
+  },
+  "devDependencies": {
+    "blume": "^1.1.2"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

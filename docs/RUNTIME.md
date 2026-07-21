@@ -1,3 +1,8 @@
+---
+title: "Runtime binary (pvm)"
+description: "One-binary host: run, ops, interpret, promote."
+---
+
 # PVM Runtime Binary (`pvm`)
 
 One binary = disposable host CPU for a durable world file.
