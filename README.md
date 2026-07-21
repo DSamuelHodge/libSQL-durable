@@ -16,16 +16,20 @@ but it is not an acceptance gate for this crate.
 (local, multi-worker `sqld`, embedded replica, offline sync, encryption,
 multi-tenant, day-2 ops, durable process demos).
 
-**Docs site (Blume):** Markdown in `docs/` → static site with local search.
+**Docs site (Blume → GitHub Pages):**  
+https://dsamuelhodge.github.io/libSQL-durable/
 
 ```sh
 npm install
-npm run docs:dev       # http://localhost:3000 (default)
-npm run docs:build     # dist/ + Orama search index
+npm run docs:dev       # local hot reload + Orama search
+npm run docs:build     # dist/ (same artifact Pages deploys)
 npm run docs:preview
-npm run docs:doctor    # config / content diagnostics
+npm run docs:doctor
 ```
 
+Deploy: push to `main` (paths under `docs/`, `blume.config.ts`, …) runs
+[`.github/workflows/docs.yml`](./.github/workflows/docs.yml). One-time:
+**Settings → Pages → Source: GitHub Actions**.
 **Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
 Durable process kernel (world + journal + syscalls), not only a storage adapter.  
 **PVM kernel (0–7) + collapse finish line complete** (`SCHEMA_VERSION` = 2):  

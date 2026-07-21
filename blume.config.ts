@@ -62,9 +62,13 @@ export default defineConfig({
     structuredData: true,
   },
 
-  // Set deployment.site when you have a canonical public URL.
+  // GitHub Pages project site:
+  //   https://dsamuelhodge.github.io/libSQL-durable/
+  // `base` is required for asset/link rewriting under the repo subpath.
   deployment: {
     output: "static",
-    // site: "https://dsamuelhodge.github.io/libSQL-durable",
+    site: "https://dsamuelhodge.github.io/libSQL-durable",
+    base: "/libSQL-durable",
   },
 });
+
