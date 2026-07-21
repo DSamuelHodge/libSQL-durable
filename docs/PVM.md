@@ -425,6 +425,8 @@ Stable projections (API and/or SQL views):
 | `queues` | depths + oldest visible ages |
 | `health` | schema version, poison counts, lag signals |
 
+**Status: implemented in-tree** — `src/introspect.rs`, [`INTROSPECTION.md`](./INTROSPECTION.md), `tests/introspection.rs`.
+
 **Exit criteria:** an operator can debug stuck work without reading Rust or raw JSON events by hand.
 
 ### Phase 3 — Healing policies
@@ -528,21 +530,23 @@ Design for **many small durable processes**, not one mega-process writing contin
 | Scheduler | orchestrator_queue / worker_queue |
 | Syscalls | worker queue + activity completion path (Duroxide) |
 | Memory | KV APIs + `execute_sql` / `query_sql` |
-| Introspection | `ProviderAdmin` |
+| Introspection | `ProviderAdmin` + `ps` / `next` / `why_blocked` / `trace` / `queues` / `health` |
 | Certification | `tests/*`, `scripts/run-*-tests.sh` |
 | Practical patterns | [`COOKBOOK.md`](../COOKBOOK.md) |
 | Runnable process demos | `examples/agent_loop.rs`, `examples/agent_nvidia.rs` (syscalls = activities) |
 
-**Honest position:** this crate is **Phase 0** (durable kernel world) with partial Phase 1–2 substrate (migrate/version, admin, multi-topology open).  
+**Honest position:** Phases **0–2** implemented in-tree; Phase **3** (healing) remains for PVM v1.
 
 | Target | Scope | Status |
 |---|---|---|
-| **PVM v1** | Phases 0–3 | **In progress** — finish this |
+| **PVM v1** | Phases 0–3 | **In progress** — Phase 3 next |
 | **PVM horizon** | Phases 4–7 | Direction after v1 |
 
-**Next build order for v1:** Phase 1 (world packaging) → Phase 2 (introspection) → Phase 3 (healing).
+**Next build order for v1:** ~~Phase 1~~ → ~~Phase 2~~ → **Phase 3 (healing)**.
 
-**Phase 1 implementation:** see [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) (`world_manifest`, fence, copy/resume APIs).---
+**Phase 1:** [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) · **Phase 2:** [`INTROSPECTION.md`](./INTROSPECTION.md)
+
+---
 
 ## 13. Non-goals (explicit)
 

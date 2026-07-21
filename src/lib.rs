@@ -16,6 +16,8 @@ mod config;
 #[cfg(feature = "compat-sqlite")]
 mod compat;
 #[cfg(feature = "native-libsql")]
+mod introspect;
+#[cfg(feature = "native-libsql")]
 mod native;
 #[cfg(feature = "native-libsql")]
 mod world;
@@ -25,6 +27,11 @@ pub use duroxide;
 
 #[cfg(feature = "compat-sqlite")]
 pub use compat::CompatSqliteProvider;
+#[cfg(feature = "native-libsql")]
+pub use introspect::{
+    BlockReason, NextWorkItem, ProcessRow, QueueSnapshot, TraceEvent, WhyBlocked, WorkQueueKind,
+    WorldHealth, DEFAULT_POISON_ATTEMPT_THRESHOLD,
+};
 #[cfg(feature = "native-libsql")]
 pub use native::{NativeLibsqlProvider, ProviderTuning};
 #[cfg(feature = "native-libsql")]
@@ -194,6 +201,66 @@ impl LibsqlProvider {
     ) -> Result<WorldPackagePaths, LibsqlProviderInitError> {
         match self {
             Self::Native(provider) => provider.package_copy_to(src_db, dst_db).await,
+        }
+    }
+
+    /// PVM `ps` — non-terminal processes and lock holders.
+    #[cfg(feature = "native-libsql")]
+    pub async fn ps(&self) -> Result<Vec<ProcessRow>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.introspect_ps().await,
+        }
+    }
+
+    /// PVM `next` — next unlocked visible work items.
+    #[cfg(feature = "native-libsql")]
+    pub async fn next_work(&self, limit: u32) -> Result<Vec<NextWorkItem>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.introspect_next(limit).await,
+        }
+    }
+
+    /// PVM `why_blocked` — classify why an instance is not progressing.
+    #[cfg(feature = "native-libsql")]
+    pub async fn why_blocked(&self, instance_id: &str) -> Result<WhyBlocked, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.introspect_why_blocked(instance_id).await,
+        }
+    }
+
+    /// PVM `trace` — ordered journal projection.
+    #[cfg(feature = "native-libsql")]
+    pub async fn trace(
+        &self,
+        instance_id: &str,
+        execution_id: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<TraceEvent>, ProviderError> {
+        match self {
+            Self::Native(provider) => {
+                provider
+                    .introspect_trace(instance_id, execution_id, limit)
+                    .await
+            }
+        }
+    }
+
+    /// PVM `queues` — depths and pressure signals.
+    #[cfg(feature = "native-libsql")]
+    pub async fn queues(&self) -> Result<QueueSnapshot, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.introspect_queues().await,
+        }
+    }
+
+    /// PVM `health` — fence, counts, poison, queues.
+    #[cfg(feature = "native-libsql")]
+    pub async fn health(
+        &self,
+        poison_attempt_threshold: Option<i64>,
+    ) -> Result<WorldHealth, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.introspect_health(poison_attempt_threshold).await,
         }
     }
 

@@ -442,6 +442,8 @@ impl NativeLibsqlProvider {
 
     /// Open a connection with remote-aware busy timeout applied when supported.
     ///
+    /// `pub(crate)` so introspection and world helpers share one connect path.
+    ///
     /// Local SQLite applies the pragma via `query` (PRAGMA returns a row).
     /// Self-hosted `sqld` over Hrana may reject it with "unsupported statement";
     /// that is ignored so remote mode still works.
@@ -729,7 +731,7 @@ impl NativeLibsqlProvider {
         Ok(())
     }
 
-    fn libsql_to_provider_error(operation: &str, error: libsql::Error) -> ProviderError {
+    pub(crate) fn libsql_to_provider_error(operation: &str, error: libsql::Error) -> ProviderError {
         let msg = error.to_string();
         let lower = msg.to_ascii_lowercase();
         // Classify permanent failures first: remote Hrana wrappers often embed the
@@ -799,7 +801,7 @@ impl NativeLibsqlProvider {
         Ok(())
     }
 
-    fn now_millis() -> i64 {
+    pub(crate) fn now_millis() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after UNIX epoch")
@@ -1061,7 +1063,7 @@ impl NativeLibsqlProvider {
         ids.iter().cloned().map(Value::Text).collect()
     }
 
-    fn coerce_timestamp(value: Value) -> u64 {
+    pub(crate) fn coerce_timestamp(value: Value) -> u64 {
         match value {
             Value::Integer(v) => v.max(0) as u64,
             Value::Real(v) => {
@@ -1076,7 +1078,7 @@ impl NativeLibsqlProvider {
         }
     }
 
-    fn optional_text(value: Value) -> Option<String> {
+    pub(crate) fn optional_text(value: Value) -> Option<String> {
         match value {
             Value::Text(s) => Some(s),
             Value::Null => None,
@@ -1084,7 +1086,7 @@ impl NativeLibsqlProvider {
         }
     }
 
-    async fn query_count(
+    pub(crate) async fn query_count(
         conn: &libsql::Connection,
         sql: &str,
         params: impl libsql::params::IntoParams,
