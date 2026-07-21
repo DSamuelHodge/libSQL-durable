@@ -115,7 +115,9 @@ async fn ps_lists_running_and_why_blocked_lock() {
 
     let procs = p.ps().await.unwrap();
     assert!(
-        procs.iter().any(|r| r.instance_id == "run-1" && r.lock_held),
+        procs
+            .iter()
+            .any(|r| r.instance_id == "run-1" && r.lock_held),
         "expected run-1 locked in ps: {procs:?}"
     );
 

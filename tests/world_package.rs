@@ -3,7 +3,7 @@
 use duroxide::providers::Provider;
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
 use libsql_durable::{
-    copy_world_package, open_world_checklist, LibsqlProvider, SCHEMA_VERSION, WORLD_FORMAT_VERSION,
+    LibsqlProvider, SCHEMA_VERSION, WORLD_FORMAT_VERSION, copy_world_package, open_world_checklist,
 };
 
 fn started(instance: &str) -> Event {

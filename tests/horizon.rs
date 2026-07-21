@@ -38,9 +38,13 @@ async fn put_get_list_process_definitions() {
     )
     .await
     .unwrap();
-    p.put_process_definition("AgentLoop", "1.1.0", r#"{"steps":["think","act","reflect"]}"#)
-        .await
-        .unwrap();
+    p.put_process_definition(
+        "AgentLoop",
+        "1.1.0",
+        r#"{"steps":["think","act","reflect"]}"#,
+    )
+    .await
+    .unwrap();
 
     let d = p
         .get_process_definition("AgentLoop", "1.0.0")
@@ -71,9 +75,7 @@ async fn pin_requires_existing_definition() {
     p.put_process_definition("Ok", "1.0.0", r#"{"n":1}"#)
         .await
         .unwrap();
-    p.pin_process_definition("i1", "Ok", "1.0.0")
-        .await
-        .unwrap();
+    p.pin_process_definition("i1", "Ok", "1.0.0").await.unwrap();
     let pin = p
         .get_process_definition_pin("i1")
         .await

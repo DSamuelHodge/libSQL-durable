@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use duroxide::runtime::registry::OrchestrationRegistry;
 use duroxide::OrchestrationContext;
+use duroxide::runtime::registry::OrchestrationRegistry;
 use serde_json::Value as JsonValue;
 
-use crate::definitions::{validate_definition_body, PVM_DEF_V1};
+use crate::definitions::{PVM_DEF_V1, validate_definition_body};
 
 /// Orchestration name registered for interpreted processes.
 pub const INTERPRETED_ORCH_NAME: &str = "pvm.interpret";

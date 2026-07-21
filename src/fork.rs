@@ -10,7 +10,7 @@ use libsql::params;
 
 use crate::native::NativeLibsqlProvider;
 use crate::world::{self, WorldPackagePaths};
-use crate::{copy_world_package, LibsqlDatabaseConfig, LibsqlProvider, LibsqlProviderInitError};
+use crate::{LibsqlDatabaseConfig, LibsqlProvider, LibsqlProviderInitError, copy_world_package};
 
 #[derive(Debug, Clone, Default)]
 pub struct ForkOptions {
@@ -79,12 +79,9 @@ impl NativeLibsqlProvider {
         dst_db: impl AsRef<Path>,
         options: ForkOptions,
     ) -> Result<ForkResult, LibsqlProviderInitError> {
-        let parent = self
-            .world_manifest()
-            .await?
-            .ok_or_else(|| {
-                LibsqlProviderInitError::InvalidConfig("parent world_manifest missing".into())
-            })?;
+        let parent = self.world_manifest().await?.ok_or_else(|| {
+            LibsqlProviderInitError::InvalidConfig("parent world_manifest missing".into())
+        })?;
 
         let _ = self.checkpoint_wal().await;
         copy_world_package(src_db.as_ref(), dst_db.as_ref())?;
@@ -95,12 +92,7 @@ impl NativeLibsqlProvider {
             LibsqlProviderInitError::InvalidConfig("child is not native backend".into())
         })?;
         let conn = native.connect().await?;
-        world::stamp_fork_lineage(
-            &conn,
-            &parent.world_id,
-            options.note.as_deref(),
-        )
-        .await?;
+        world::stamp_fork_lineage(&conn, &parent.world_id, options.note.as_deref()).await?;
         drop(conn);
 
         if let Some(cut) = options.truncate_after_event_id {
@@ -112,12 +104,9 @@ impl NativeLibsqlProvider {
                 })?;
         } else if let Some(ref only) = options.keep_instance {
             // Drop other instances' history for a focused explore world.
-            native
-                .retain_instance_only(only)
-                .await
-                .map_err(|e| {
-                    LibsqlProviderInitError::InvalidConfig(format!("retain instance: {e}"))
-                })?;
+            native.retain_instance_only(only).await.map_err(|e| {
+                LibsqlProviderInitError::InvalidConfig(format!("retain instance: {e}"))
+            })?;
         }
 
         if options.clear_scheduler_state {
@@ -239,10 +228,7 @@ pub fn discard_world_package(path: impl AsRef<Path>) -> Result<(), LibsqlProvide
     for p in [&paths.db, &paths.wal, &paths.shm] {
         if p.exists() {
             std::fs::remove_file(p).map_err(|e| {
-                LibsqlProviderInitError::InvalidConfig(format!(
-                    "discard {}: {e}",
-                    p.display()
-                ))
+                LibsqlProviderInitError::InvalidConfig(format!("discard {}: {e}", p.display()))
             })?;
         }
     }

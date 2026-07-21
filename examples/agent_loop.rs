@@ -64,13 +64,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             Ok(plan.to_string())
         })
-        .register("Research", |_ctx: ActivityContext, topic: String| async move {
-            // Stand-in for web/search tool.
-            Ok(format!(
-                "Research notes on '{topic}': libSQL is a SQLite fork with replicas, \
+        .register(
+            "Research",
+            |_ctx: ActivityContext, topic: String| async move {
+                // Stand-in for web/search tool.
+                Ok(format!(
+                    "Research notes on '{topic}': libSQL is a SQLite fork with replicas, \
                  remote sqld, encryption, and optional vectors."
-            ))
-        })
+                ))
+            },
+        )
         .register("Draft", |_ctx: ActivityContext, notes: String| async move {
             Ok(format!(
                 "Draft answer based on notes ({} chars): Durable agents should treat \
@@ -78,23 +81,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 notes.len()
             ))
         })
-        .register(
-            "Remember",
-            move |_ctx: ActivityContext, payload: String| {
-                let memory_db = memory_db.clone();
-                async move {
-                    // Same libSQL file as orchestration history.
-                    let text = payload.replace('\'', "''");
-                    memory_db
-                        .execute_sql(&format!(
-                            "INSERT INTO agent_memories (text, source) VALUES ('{text}', 'Remember')"
-                        ))
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    Ok(format!("stored memory ({} bytes)", payload.len()))
-                }
-            },
-        )
+        .register("Remember", move |_ctx: ActivityContext, payload: String| {
+            let memory_db = memory_db.clone();
+            async move {
+                // Same libSQL file as orchestration history.
+                let text = payload.replace('\'', "''");
+                memory_db
+                    .execute_sql(&format!(
+                        "INSERT INTO agent_memories (text, source) VALUES ('{text}', 'Remember')"
+                    ))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("stored memory ({} bytes)", payload.len()))
+            }
+        })
         .build();
 
     // ── 3. AgentLoop orchestration (deterministic control plane) ──────────
@@ -126,7 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let (_idx, decision) = ctx.select2(timeout, human).await.into_tuple();
         ctx.set_kv_value("human_decision", &decision);
-        ctx.set_custom_status(&format!(r#"{{"phase":"remembering","decision":"{decision}"}}"#));
+        ctx.set_custom_status(format!(
+            r#"{{"phase":"remembering","decision":"{decision}"}}"#
+        ));
 
         let memory_blob = format!("goal={goal}; decision={decision}; draft={draft}");
         let remembered = ctx.schedule_activity("Remember", memory_blob).await?;
@@ -195,19 +197,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── 5. Prove same-file collapse: history + memories ───────────────────
-    if let Some(admin) = provider.as_management_capability() {
-        if let Ok(info) = admin.get_instance_info(&instance_id).await {
-            println!(
-                "instance status={} execution={}",
-                info.status, info.current_execution_id
-            );
-        }
+    if let Some(admin) = provider.as_management_capability()
+        && let Ok(info) = admin.get_instance_info(&instance_id).await
+    {
+        println!(
+            "instance status={} execution={}",
+            info.status, info.current_execution_id
+        );
     }
     if let Ok(goal) = client.get_kv_value(&instance_id, "goal").await {
         println!("kv.goal = {goal:?}");
     }
     if let Ok(rows) = provider
-        .query_sql("SELECT id, substr(text, 1, 80), source FROM agent_memories ORDER BY id DESC LIMIT 3")
+        .query_sql(
+            "SELECT id, substr(text, 1, 80), source FROM agent_memories ORDER BY id DESC LIMIT 3",
+        )
         .await
     {
         println!("agent_memories (same DB file):");

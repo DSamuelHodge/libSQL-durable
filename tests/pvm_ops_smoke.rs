@@ -27,7 +27,7 @@ async fn status_health_ps_heal_on_empty_world() {
     assert_eq!(q.orchestrator_unlocked + q.orchestrator_locked, 0);
 
     let heal = p.heal(HealOptions::default()).await.unwrap();
-    assert!(heal.actions.len() >= 1);
+    assert!(!heal.actions.is_empty());
 }
 
 #[tokio::test]
@@ -39,8 +39,5 @@ async fn reopen_preserves_world_for_host_restart() {
         p.world_manifest().await.unwrap().unwrap().world_id
     };
     let p2 = LibsqlProvider::new_local(&path).await.unwrap();
-    assert_eq!(
-        p2.world_manifest().await.unwrap().unwrap().world_id,
-        id
-    );
+    assert_eq!(p2.world_manifest().await.unwrap().unwrap().world_id, id);
 }

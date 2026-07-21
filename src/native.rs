@@ -63,20 +63,20 @@ impl ProviderTuning {
         } else {
             Self::default()
         };
-        if let Ok(v) = std::env::var("LIBSQL_BUSY_TIMEOUT_MS") {
-            if let Ok(ms) = v.parse() {
-                tuning.busy_timeout_ms = ms;
-            }
+        if let Ok(v) = std::env::var("LIBSQL_BUSY_TIMEOUT_MS")
+            && let Ok(ms) = v.parse()
+        {
+            tuning.busy_timeout_ms = ms;
         }
-        if let Ok(v) = std::env::var("LIBSQL_TRANSIENT_RETRIES") {
-            if let Ok(n) = v.parse() {
-                tuning.max_transient_retries = n;
-            }
+        if let Ok(v) = std::env::var("LIBSQL_TRANSIENT_RETRIES")
+            && let Ok(n) = v.parse()
+        {
+            tuning.max_transient_retries = n;
         }
-        if let Ok(v) = std::env::var("LIBSQL_RETRY_BASE_DELAY_MS") {
-            if let Ok(ms) = v.parse() {
-                tuning.retry_base_delay_ms = ms;
-            }
+        if let Ok(v) = std::env::var("LIBSQL_RETRY_BASE_DELAY_MS")
+            && let Ok(ms) = v.parse()
+        {
+            tuning.retry_base_delay_ms = ms;
         }
         tuning
     }
@@ -118,9 +118,7 @@ impl NativeLibsqlProvider {
         };
 
         match mode {
-            LibsqlDatabaseMode::InMemory => {
-                Self::open_local(":memory:", options, tuning).await
-            }
+            LibsqlDatabaseMode::InMemory => Self::open_local(":memory:", options, tuning).await,
             LibsqlDatabaseMode::Local { path } => Self::open_local(path, options, tuning).await,
             LibsqlDatabaseMode::Remote { url, auth_token } => {
                 Self::open_remote(url, auth_token, options, tuning).await
@@ -129,12 +127,16 @@ impl NativeLibsqlProvider {
                 local_path,
                 remote_url,
                 auth_token,
-            } => Self::open_remote_replica(local_path, remote_url, auth_token, options, tuning).await,
+            } => {
+                Self::open_remote_replica(local_path, remote_url, auth_token, options, tuning).await
+            }
             LibsqlDatabaseMode::OfflineSynced {
                 local_path,
                 remote_url,
                 auth_token,
-            } => Self::open_offline_synced(local_path, remote_url, auth_token, options, tuning).await,
+            } => {
+                Self::open_offline_synced(local_path, remote_url, auth_token, options, tuning).await
+            }
         }
     }
 
@@ -196,14 +198,12 @@ impl NativeLibsqlProvider {
         tuning: ProviderTuning,
     ) -> Result<Self, LibsqlProviderInitError> {
         let path = path.into();
-        if path.as_os_str() != ":memory:" {
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    libsql::Error::ConnectionFailed(format!(
-                        "failed to create database directory: {e}"
-                    ))
-                })?;
-            }
+        if path.as_os_str() != ":memory:"
+            && let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                libsql::Error::ConnectionFailed(format!("failed to create database directory: {e}"))
+            })?;
         }
 
         let mut builder = libsql::Builder::new_local(path);
@@ -386,7 +386,7 @@ impl NativeLibsqlProvider {
             .map_err(|e| Self::libsql_to_provider_error("query_sql", e))?
         {
             let mut cells = Vec::new();
-            let cols = row.column_count().max(0) as i32;
+            let cols = row.column_count().max(0);
             for idx in 0..cols {
                 match row.get_value(idx) {
                     Ok(Value::Null) => cells.push(None),
@@ -492,9 +492,7 @@ impl NativeLibsqlProvider {
         loop {
             match f().await {
                 Ok(value) => return Ok(value),
-                Err(err)
-                    if err.is_retryable() && attempt < self.tuning.max_transient_retries =>
-                {
+                Err(err) if err.is_retryable() && attempt < self.tuning.max_transient_retries => {
                     attempt += 1;
                     let shift = (attempt - 1).min(4);
                     let delay_ms = self
@@ -570,10 +568,7 @@ impl NativeLibsqlProvider {
     pub async fn schema_version(&self) -> Result<Option<i64>, LibsqlProviderInitError> {
         let conn = self.connect().await?;
         let mut rows = conn
-            .query(
-                "SELECT version FROM schema_meta WHERE id = 1",
-                (),
-            )
+            .query("SELECT version FROM schema_meta WHERE id = 1", ())
             .await?;
         match rows.next().await? {
             Some(row) => Ok(Some(row.get::<i64>(0)?)),
@@ -590,15 +585,14 @@ impl NativeLibsqlProvider {
     }
 
     /// Open-world checklist report (manifest + fence status).
-    pub async fn world_open_report(&self) -> Result<crate::WorldOpenReport, LibsqlProviderInitError> {
-        let manifest = self
-            .world_manifest()
-            .await?
-            .ok_or_else(|| {
-                LibsqlProviderInitError::InvalidConfig(
-                    "world_manifest missing; call migrate()/open first".into(),
-                )
-            })?;
+    pub async fn world_open_report(
+        &self,
+    ) -> Result<crate::WorldOpenReport, LibsqlProviderInitError> {
+        let manifest = self.world_manifest().await?.ok_or_else(|| {
+            LibsqlProviderInitError::InvalidConfig(
+                "world_manifest missing; call migrate()/open first".into(),
+            )
+        })?;
         let mut notes = Vec::new();
         let schema_ok = crate::world::check_schema_fence(manifest.schema_version).is_ok();
         let format_ok = crate::world::check_format_fence(manifest.world_format_version).is_ok();
@@ -722,12 +716,9 @@ impl NativeLibsqlProvider {
         )
         .await?;
 
-        let _manifest = crate::world::ensure_world_manifest(
-            &conn,
-            "libsql-native",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await?;
+        let _manifest =
+            crate::world::ensure_world_manifest(&conn, "libsql-native", env!("CARGO_PKG_VERSION"))
+                .await?;
         // Phase 3–7 tables — best-effort on open/migrate.
         drop(conn);
         let _ = self.ensure_healing_schema().await;
@@ -3064,10 +3055,16 @@ impl ProviderAdmin for NativeLibsqlProvider {
             .map_err(|e| Self::libsql_to_provider_error("get_instance_info", e))?
             as u64;
         let created_at = Self::coerce_timestamp(row.get_value(4).map_err(|e| {
-            ProviderError::permanent("get_instance_info", format!("Failed to get created_at: {e}"))
+            ProviderError::permanent(
+                "get_instance_info",
+                format!("Failed to get created_at: {e}"),
+            )
         })?);
         let updated_at = Self::coerce_timestamp(row.get_value(5).map_err(|e| {
-            ProviderError::permanent("get_instance_info", format!("Failed to get updated_at: {e}"))
+            ProviderError::permanent(
+                "get_instance_info",
+                format!("Failed to get updated_at: {e}"),
+            )
         })?);
         let parent_instance_id = Self::optional_text(row.get_value(6).map_err(|e| {
             ProviderError::permanent(
@@ -3223,12 +3220,20 @@ impl ProviderAdmin for NativeLibsqlProvider {
             as u64;
         drop(rows);
 
-        let total_executions =
-            Self::query_count(&conn, "SELECT COUNT(*) FROM executions", (), "get_system_metrics")
-                .await? as u64;
-        let total_events =
-            Self::query_count(&conn, "SELECT COUNT(*) FROM history", (), "get_system_metrics")
-                .await? as u64;
+        let total_executions = Self::query_count(
+            &conn,
+            "SELECT COUNT(*) FROM executions",
+            (),
+            "get_system_metrics",
+        )
+        .await? as u64;
+        let total_events = Self::query_count(
+            &conn,
+            "SELECT COUNT(*) FROM history",
+            (),
+            "get_system_metrics",
+        )
+        .await? as u64;
 
         Ok(SystemMetrics {
             total_instances,
@@ -3352,9 +3357,9 @@ impl ProviderAdmin for NativeLibsqlProvider {
                     )
                 })?);
                 if status.as_deref() == Some("Running") {
-                    let instance_id = row
-                        .get::<String>(0)
-                        .map_err(|e| Self::libsql_to_provider_error("delete_instances_atomic", e))?;
+                    let instance_id = row.get::<String>(0).map_err(|e| {
+                        Self::libsql_to_provider_error("delete_instances_atomic", e)
+                    })?;
                     return Err(ProviderError::permanent(
                         "delete_instances_atomic",
                         format!(

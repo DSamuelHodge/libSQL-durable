@@ -7,7 +7,7 @@
 //! See `docs/INTROSPECTION.md` and `docs/PVM.md` Phase 2.
 
 use duroxide::providers::ProviderError;
-use libsql::{params, Value};
+use libsql::{Value, params};
 
 use crate::native::{NativeLibsqlProvider, SCHEMA_VERSION};
 use crate::world::{self, WORLD_FORMAT_VERSION};
@@ -74,15 +74,11 @@ pub enum BlockReason {
         last_event_id: Option<i64>,
     },
     /// Process is terminal.
-    Terminal {
-        status: String,
-    },
+    Terminal { status: String },
     /// Instance not found.
     NotFound,
     /// Could not classify; includes free-form detail.
-    Other {
-        detail: String,
-    },
+    Other { detail: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,8 +175,7 @@ impl NativeLibsqlProvider {
                 Err(_) => None,
             };
             let lock_token = Self::optional_text(row.get_value(5).unwrap_or(Value::Null));
-            let lock_held = lock_token.is_some()
-                && locked_until.map(|u| u > now).unwrap_or(false);
+            let lock_held = lock_token.is_some() && locked_until.map(|u| u > now).unwrap_or(false);
             out.push(ProcessRow {
                 instance_id: row
                     .get::<String>(0)
@@ -273,10 +268,7 @@ impl NativeLibsqlProvider {
         Ok(out)
     }
 
-    fn row_to_next(
-        row: libsql::Row,
-        queue: WorkQueueKind,
-    ) -> Result<NextWorkItem, ProviderError> {
+    fn row_to_next(row: libsql::Row, queue: WorkQueueKind) -> Result<NextWorkItem, ProviderError> {
         let locked = match row.get_value(4).unwrap_or(Value::Integer(0)) {
             Value::Integer(v) => v != 0,
             _ => false,
@@ -287,9 +279,7 @@ impl NativeLibsqlProvider {
                 .get::<i64>(0)
                 .map_err(|e| Self::libsql_to_provider_error("introspect_next", e))?,
             instance_id: Self::optional_text(row.get_value(1).unwrap_or(Value::Null)),
-            visible_at: row
-                .get::<String>(2)
-                .unwrap_or_else(|_| String::from("0")),
+            visible_at: row.get::<String>(2).unwrap_or_else(|_| String::from("0")),
             attempt_count: row.get::<i64>(3).unwrap_or(0),
             locked,
             summary: row.get::<String>(5).unwrap_or_default(),
@@ -337,15 +327,15 @@ impl NativeLibsqlProvider {
         };
 
         let status = Self::optional_text(row.get_value(0).unwrap_or(Value::Null));
-        if let Some(ref s) = status {
-            if matches!(s.as_str(), "Completed" | "Failed" | "ContinuedAsNew") {
-                return Ok(WhyBlocked {
-                    instance_id: instance_id.to_string(),
-                    status: status.clone(),
-                    reason: BlockReason::Terminal { status: s.clone() },
-                    notes: vec!["process is terminal; no further scheduling expected".into()],
-                });
-            }
+        if let Some(ref s) = status
+            && matches!(s.as_str(), "Completed" | "Failed" | "ContinuedAsNew")
+        {
+            return Ok(WhyBlocked {
+                instance_id: instance_id.to_string(),
+                status: status.clone(),
+                reason: BlockReason::Terminal { status: s.clone() },
+                notes: vec!["process is terminal; no further scheduling expected".into()],
+            });
         }
 
         let lock_token = Self::optional_text(row.get_value(1).unwrap_or(Value::Null));
@@ -477,10 +467,10 @@ impl NativeLibsqlProvider {
             (None, None)
         };
 
-        if let Some(ref t) = last_event_type {
-            if t.contains("External") || t.contains("Subscribed") || t.contains("Wait") {
-                notes.push("last event suggests waiting on external input".into());
-            }
+        if let Some(ref t) = last_event_type
+            && (t.contains("External") || t.contains("Subscribed") || t.contains("Wait"))
+        {
+            notes.push("last event suggests waiting on external input".into());
         }
 
         Ok(WhyBlocked {
@@ -569,30 +559,29 @@ impl NativeLibsqlProvider {
             .connect()
             .await
             .map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))?;
-        let mut q = QueueSnapshot::default();
 
-        q.orchestrator_unlocked = Self::query_count(
+        let orchestrator_unlocked = Self::query_count(
             &conn,
             "SELECT COUNT(*) FROM orchestrator_queue WHERE lock_token IS NULL",
             (),
             "introspect_queues",
         )
         .await? as u64;
-        q.orchestrator_locked = Self::query_count(
+        let orchestrator_locked = Self::query_count(
             &conn,
             "SELECT COUNT(*) FROM orchestrator_queue WHERE lock_token IS NOT NULL",
             (),
             "introspect_queues",
         )
         .await? as u64;
-        q.worker_unlocked = Self::query_count(
+        let worker_unlocked = Self::query_count(
             &conn,
             "SELECT COUNT(*) FROM worker_queue WHERE lock_token IS NULL",
             (),
             "introspect_queues",
         )
         .await? as u64;
-        q.worker_locked = Self::query_count(
+        let worker_locked = Self::query_count(
             &conn,
             "SELECT COUNT(*) FROM worker_queue WHERE lock_token IS NOT NULL",
             (),
@@ -600,14 +589,14 @@ impl NativeLibsqlProvider {
         )
         .await? as u64;
 
-        q.orchestrator_max_attempt = Self::query_count(
+        let orchestrator_max_attempt = Self::query_count(
             &conn,
             "SELECT COALESCE(MAX(attempt_count), 0) FROM orchestrator_queue",
             (),
             "introspect_queues",
         )
         .await?;
-        q.worker_max_attempt = Self::query_count(
+        let worker_max_attempt = Self::query_count(
             &conn,
             "SELECT COALESCE(MAX(attempt_count), 0) FROM worker_queue",
             (),
@@ -622,10 +611,15 @@ impl NativeLibsqlProvider {
             )
             .await
             .map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))?;
-        if let Some(row) = rows.next().await.map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))? {
-            q.orchestrator_oldest_visible_at =
-                Self::optional_text(row.get_value(0).unwrap_or(Value::Null));
-        }
+        let orchestrator_oldest_visible_at = if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))?
+        {
+            Self::optional_text(row.get_value(0).unwrap_or(Value::Null))
+        } else {
+            None
+        };
         drop(rows);
 
         let mut rows = conn
@@ -635,12 +629,26 @@ impl NativeLibsqlProvider {
             )
             .await
             .map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))?;
-        if let Some(row) = rows.next().await.map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))? {
-            q.worker_oldest_visible_at =
-                Self::optional_text(row.get_value(0).unwrap_or(Value::Null));
-        }
+        let worker_oldest_visible_at = if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("introspect_queues", e))?
+        {
+            Self::optional_text(row.get_value(0).unwrap_or(Value::Null))
+        } else {
+            None
+        };
 
-        Ok(q)
+        Ok(QueueSnapshot {
+            orchestrator_unlocked,
+            orchestrator_locked,
+            orchestrator_oldest_visible_at,
+            orchestrator_max_attempt,
+            worker_unlocked,
+            worker_locked,
+            worker_oldest_visible_at,
+            worker_max_attempt,
+        })
     }
 
     /// `health` — schema fence, counts, poison, queues.

@@ -238,12 +238,9 @@ impl NativeLibsqlProvider {
         }
         drop(rows);
         for id in orch_ids {
-            conn.execute(
-                "DELETE FROM orchestrator_queue WHERE id = ?1",
-                params![id],
-            )
-            .await
-            .map_err(|e| Self::libsql_to_provider_error("heal_quarantine_poison", e))?;
+            conn.execute("DELETE FROM orchestrator_queue WHERE id = ?1", params![id])
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("heal_quarantine_poison", e))?;
         }
 
         // Worker poison
@@ -352,8 +349,7 @@ impl NativeLibsqlProvider {
             .map_err(|e| Self::libsql_to_provider_error("heal_fence_orphan_queue_items", e))?;
 
         let rows = orch + worker + locks;
-        let detail =
-            format!("orphan_orch={orch} orphan_worker={worker} orphan_locks={locks}");
+        let detail = format!("orphan_orch={orch} orphan_worker={worker} orphan_locks={locks}");
         self.audit("fence_orphan_queue_items", rows, &detail)
             .await?;
         Ok(HealActionResult {
@@ -456,7 +452,9 @@ impl NativeLibsqlProvider {
         report.actions.push(r);
 
         // Compact only if there is runaway pressure (cheap pre-check via health).
-        let health = self.introspect_health(options.poison_attempt_threshold).await?;
+        let health = self
+            .introspect_health(options.poison_attempt_threshold)
+            .await?;
         if health.queues.orchestrator_max_attempt >= 0 {
             // always allow compact pass; it no-ops when no runaway instances
             let r = self.heal_compact_histories(&options).await?;

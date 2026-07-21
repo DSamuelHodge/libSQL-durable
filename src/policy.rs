@@ -204,7 +204,7 @@ impl NativeLibsqlProvider {
         }
 
         if health.poison_orchestrator_items + health.poison_worker_items > 0 {
-            // Slightly stricter poison threshold so quarantine triggers earlier next time? 
+            // Slightly stricter poison threshold so quarantine triggers earlier next time?
             // Actually if poison present, lower threshold to catch earlier - min 3.
             let next = (policy.poison_threshold - 1).max(3);
             if next != policy.poison_threshold {
@@ -214,11 +214,12 @@ impl NativeLibsqlProvider {
         }
 
         // Large history pressure → prefer keeping fewer executions when compacting.
-        if health.total_instances > 0 && health.queues.orchestrator_max_attempt >= 3 {
-            if policy.compact_keep_last > 1 {
-                policy.compact_keep_last = 1;
-                changed = true;
-            }
+        if health.total_instances > 0
+            && health.queues.orchestrator_max_attempt >= 3
+            && policy.compact_keep_last > 1
+        {
+            policy.compact_keep_last = 1;
+            changed = true;
         }
 
         if changed {

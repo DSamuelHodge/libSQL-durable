@@ -55,7 +55,10 @@ impl RemoteLibsqlStressFactory {
     }
 
     async fn prepare_clean_provider(&self) -> Result<LibsqlProvider, String> {
-        let provider = LibsqlProvider::new(LibsqlDatabaseConfig::remote(self.url.clone(), self.auth_token.clone()))
+        let provider = LibsqlProvider::new(LibsqlDatabaseConfig::remote(
+            self.url.clone(),
+            self.auth_token.clone(),
+        ))
         .await
         .map_err(|e| format!("remote provider init failed: {e}"))?;
         provider
@@ -212,7 +215,10 @@ async fn remote_large_payload_stress_smoke() {
         result.success_rate()
     );
 
-    assert_eq!(result.failed, 0, "remote large-payload failures: {result:?}");
+    assert_eq!(
+        result.failed, 0,
+        "remote large-payload failures: {result:?}"
+    );
     assert!(
         result.success_rate() >= 100.0,
         "remote large-payload success rate was {:.2}%",

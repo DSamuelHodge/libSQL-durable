@@ -18,8 +18,8 @@ use duroxide::runtime;
 use duroxide::runtime::registry::{ActivityRegistry, OrchestrationRegistry};
 use duroxide::{ActivityContext, Client, OrchestrationContext};
 use libsql_durable::{
-    interpreted_orchestrations, wrap_interpret_input, HealOptions, LibsqlDatabaseConfig,
-    LibsqlProvider, INTERPRETED_ORCH_NAME, SCHEMA_VERSION, WORLD_FORMAT_VERSION,
+    HealOptions, INTERPRETED_ORCH_NAME, LibsqlDatabaseConfig, LibsqlProvider, SCHEMA_VERSION,
+    WORLD_FORMAT_VERSION, interpreted_orchestrations, wrap_interpret_input,
 };
 
 #[derive(Debug, Parser)]
@@ -354,10 +354,7 @@ fn resolve_config(args: &WorldArgs) -> Result<LibsqlDatabaseConfig, Box<dyn std:
     if std::env::var("LIBSQL_REMOTE_URL").is_ok() || std::env::var("LIBSQL_DATABASE_URL").is_ok() {
         return Ok(LibsqlDatabaseConfig::from_env());
     }
-    Err(
-        "provide --world PATH, --remote URL, or set LIBSQL_DATABASE_URL / LIBSQL_REMOTE_URL"
-            .into(),
-    )
+    Err("provide --world PATH, --remote URL, or set LIBSQL_DATABASE_URL / LIBSQL_REMOTE_URL".into())
 }
 
 /// Stock syscalls (activities). Thin, explicit, host-only — never in the kernel crate.
@@ -390,10 +387,7 @@ fn stock_orchestrations() -> OrchestrationRegistry {
         .build()
 }
 
-async fn cmd_run(
-    world: WorldArgs,
-    heal_on_start: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_run(world: WorldArgs, heal_on_start: bool) -> Result<(), Box<dyn std::error::Error>> {
     let provider = Arc::new(open_provider(&world).await?);
     if let Some(m) = provider.world_manifest().await? {
         tracing::info!(
@@ -462,9 +456,9 @@ async fn cmd_interpret(
     instance: Option<String>,
     wait_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (name, version) = definition.split_once('@').ok_or_else(|| {
-        "definition must be Name@Version (e.g. Demo@1.0.0)".to_string()
-    })?;
+    let (name, version) = definition
+        .split_once('@')
+        .ok_or_else(|| "definition must be Name@Version (e.g. Demo@1.0.0)".to_string())?;
     let provider = Arc::new(open_provider(&world).await?);
     let def = provider
         .get_process_definition(name, version)

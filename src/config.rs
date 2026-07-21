@@ -47,30 +47,29 @@ impl LibsqlEngineOptions {
             }
         }
 
-        if let Ok(key) = std::env::var("LIBSQL_ENCRYPTION_KEY") {
-            if !key.is_empty() {
-                // Default: treat env value as raw key bytes. Set
-                // LIBSQL_ENCRYPTION_KEY_BASE64=1 if the value is base64.
-                if env_flag_true("LIBSQL_ENCRYPTION_KEY_BASE64") {
-                    options.local_encryption_key = decode_base64_loosely(&key);
-                } else {
-                    options.local_encryption_key = Some(key.into_bytes());
-                }
+        if let Ok(key) = std::env::var("LIBSQL_ENCRYPTION_KEY")
+            && !key.is_empty()
+        {
+            // Default: treat env value as raw key bytes. Set
+            // LIBSQL_ENCRYPTION_KEY_BASE64=1 if the value is base64.
+            if env_flag_true("LIBSQL_ENCRYPTION_KEY_BASE64") {
+                options.local_encryption_key = decode_base64_loosely(&key);
+            } else {
+                options.local_encryption_key = Some(key.into_bytes());
             }
         }
 
-        if let Ok(key) = std::env::var("LIBSQL_REMOTE_ENCRYPTION_KEY") {
-            if !key.is_empty() {
-                options.remote_encryption_key_b64 = Some(key);
-            }
+        if let Ok(key) = std::env::var("LIBSQL_REMOTE_ENCRYPTION_KEY")
+            && !key.is_empty()
+        {
+            options.remote_encryption_key_b64 = Some(key);
         }
 
-        if let Ok(ms) = std::env::var("LIBSQL_SYNC_INTERVAL_MS") {
-            if let Ok(parsed) = ms.parse::<u64>() {
-                if parsed > 0 {
-                    options.sync_interval = Some(Duration::from_millis(parsed));
-                }
-            }
+        if let Ok(ms) = std::env::var("LIBSQL_SYNC_INTERVAL_MS")
+            && let Ok(parsed) = ms.parse::<u64>()
+            && parsed > 0
+        {
+            options.sync_interval = Some(Duration::from_millis(parsed));
         }
 
         if let Ok(v) = std::env::var("LIBSQL_READ_YOUR_WRITES") {
@@ -115,9 +114,7 @@ impl LibsqlEngineOptions {
 }
 
 fn env_flag_true(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| env_truthy(&v))
-        .unwrap_or(false)
+    std::env::var(name).map(|v| env_truthy(&v)).unwrap_or(false)
 }
 
 fn env_truthy(v: &str) -> bool {
@@ -149,11 +146,8 @@ fn decode_base64_loosely(input: &str) -> Option<Vec<u8>> {
             t
         };
 
-        let clean: Vec<u8> = data
-            .bytes()
-            .filter(|b| !b.is_ascii_whitespace())
-            .collect();
-        if clean.is_empty() || clean.len() % 4 != 0 {
+        let clean: Vec<u8> = data.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        if clean.is_empty() || !clean.len().is_multiple_of(4) {
             return None;
         }
         let mut out = Vec::with_capacity(clean.len() / 4 * 3);
@@ -232,9 +226,7 @@ impl LibsqlDatabaseConfig {
     }
 
     pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self::new(LibsqlDatabaseMode::Local {
-            path: path.into(),
-        })
+        Self::new(LibsqlDatabaseMode::Local { path: path.into() })
     }
 
     pub fn remote(url: impl Into<String>, auth_token: impl Into<String>) -> Self {

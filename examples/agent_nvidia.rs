@@ -47,8 +47,7 @@ impl NvidiaClient {
             .unwrap_or_else(|_| "https://integrate.api.nvidia.com/v1".to_string())
             .trim_end_matches('/')
             .to_string();
-        let model =
-            std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| "z-ai/glm-5.2".to_string());
+        let model = std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| "z-ai/glm-5.2".to_string());
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()?;
@@ -266,7 +265,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("wait error: {e:?}"))?
     {
         OrchestrationStatus::Completed { output, .. } => {
-            println!("\n========== AGENT FINAL ANSWER ==========\n{output}\n========================================\n");
+            println!(
+                "\n========== AGENT FINAL ANSWER ==========\n{output}\n========================================\n"
+            );
         }
         OrchestrationStatus::Failed { details, .. } => {
             eprintln!("agent failed: {}", details.display_message());

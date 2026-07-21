@@ -424,12 +424,7 @@ pub async fn stamp_fork_lineage(
             updated_at_ms = ?4
         WHERE id = 1
         "#,
-        params![
-            new_id,
-            parent_world_id,
-            fork_note.unwrap_or("fork"),
-            now
-        ],
+        params![new_id, parent_world_id, fork_note.unwrap_or("fork"), now],
     )
     .await?;
     Ok(())

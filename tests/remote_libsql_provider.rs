@@ -22,7 +22,8 @@ use duroxide::provider_validations::prune::test_prune_safety;
 use duroxide::provider_validations::{
     ProviderFactory, test_get_execution_info, test_get_instance_info, test_get_queue_depths,
     test_get_system_metrics, test_list_executions, test_list_instances,
-    test_list_instances_by_status, test_multi_operation_atomic_ack, test_worker_peek_lock_semantics,
+    test_list_instances_by_status, test_multi_operation_atomic_ack,
+    test_worker_peek_lock_semantics,
 };
 use duroxide::providers::{Provider, TagFilter, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
@@ -63,14 +64,12 @@ async fn remote_endpoint_reachable(url: &str) -> bool {
 async fn require_remote_provider() -> Option<LibsqlProvider> {
     let url = remote_url()?;
     if !remote_endpoint_reachable(&url).await {
-        eprintln!(
-            "skipping remote tests: LIBSQL_REMOTE_URL={url} is set but not reachable"
-        );
+        eprintln!("skipping remote tests: LIBSQL_REMOTE_URL={url} is set but not reachable");
         return None;
     }
     let provider = LibsqlProvider::new(LibsqlDatabaseConfig::remote(url, auth_token()))
-    .await
-    .expect("remote provider init failed after reachability check");
+        .await
+        .expect("remote provider init failed after reachability check");
     Some(provider)
 }
 
@@ -84,7 +83,10 @@ impl ProviderFactory for RemoteLibsqlTestFactory {
     async fn create_provider(&self) -> Arc<dyn Provider> {
         // Shared remote DB: wipe runtime rows so Duroxide fixed instance IDs
         // (e.g. "instance-A") do not collide with prior runs or sibling tests.
-        let provider = LibsqlProvider::new(LibsqlDatabaseConfig::remote(self.url.clone(), self.auth_token.clone()))
+        let provider = LibsqlProvider::new(LibsqlDatabaseConfig::remote(
+            self.url.clone(),
+            self.auth_token.clone(),
+        ))
         .await
         .expect("failed to create remote validation provider");
         provider
@@ -230,10 +232,7 @@ async fn remote_append_read_and_queues_smoke() {
         .await
         .expect("remote append failed");
 
-    let history = provider
-        .read(&instance)
-        .await
-        .expect("remote read failed");
+    let history = provider.read(&instance).await.expect("remote read failed");
     assert_eq!(history.len(), 1);
 
     let worker_item = WorkItem::ActivityExecute {

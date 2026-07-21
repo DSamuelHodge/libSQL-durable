@@ -110,7 +110,11 @@ async fn replica_syncs_history_written_on_primary() {
     let instance = format!("replica-hist-{suffix}");
 
     primary
-        .append_with_execution(&instance, INITIAL_EXECUTION_ID, vec![started_event(&instance)])
+        .append_with_execution(
+            &instance,
+            INITIAL_EXECUTION_ID,
+            vec![started_event(&instance)],
+        )
         .await
         .expect("primary append failed");
 
@@ -118,7 +122,10 @@ async fn replica_syncs_history_written_on_primary() {
     assert_eq!(history_primary.len(), 1);
 
     let replica = open_replica(&tmp, "replica-hist.db").await;
-    replica.sync().await.expect("replica sync after primary write");
+    replica
+        .sync()
+        .await
+        .expect("replica sync after primary write");
 
     let history_replica = replica
         .read(&instance)
@@ -190,7 +197,11 @@ async fn replica_write_delegates_to_primary_and_resyncs() {
 
     // History written via replica should also land on primary.
     replica
-        .append_with_execution(&instance, INITIAL_EXECUTION_ID, vec![started_event(&instance)])
+        .append_with_execution(
+            &instance,
+            INITIAL_EXECUTION_ID,
+            vec![started_event(&instance)],
+        )
         .await
         .expect("replica append");
     replica.sync().await.expect("replica sync after append");
@@ -204,10 +215,7 @@ async fn replica_write_delegates_to_primary_and_resyncs() {
     // Fresh replica file should catch up from primary.
     let replica2 = open_replica(&tmp, "replica-write-2.db").await;
     replica2.sync().await.expect("second replica sync");
-    let on_replica2 = replica2
-        .read(&instance)
-        .await
-        .expect("second replica read");
+    let on_replica2 = replica2.read(&instance).await.expect("second replica read");
     assert_eq!(on_replica2.len(), 1);
 }
 
@@ -223,7 +231,11 @@ async fn replica_survives_reopen_after_sync() {
     let replica_path: PathBuf = tmp.path().join("replica-reopen.db");
 
     primary
-        .append_with_execution(&instance, INITIAL_EXECUTION_ID, vec![started_event(&instance)])
+        .append_with_execution(
+            &instance,
+            INITIAL_EXECUTION_ID,
+            vec![started_event(&instance)],
+        )
         .await
         .expect("primary append");
 
@@ -268,5 +280,8 @@ async fn replica_survives_reopen_after_sync() {
         "reopened replica should pull newer primary frames"
     );
 
-    let _ = replica.replication_index().await.expect("replication_index");
+    let _ = replica
+        .replication_index()
+        .await
+        .expect("replication_index");
 }

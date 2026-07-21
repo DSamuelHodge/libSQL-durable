@@ -163,19 +163,16 @@ impl NativeLibsqlProvider {
         force: bool,
     ) -> Result<(), ProviderError> {
         self.ensure_definitions_schema().await?;
-        validate_definition_body(body_json).map_err(|e| {
-            ProviderError::permanent("put_process_definition", e)
-        })?;
+        validate_definition_body(body_json)
+            .map_err(|e| ProviderError::permanent("put_process_definition", e))?;
 
-        if !force {
-            if self.get_process_definition(name, version).await?.is_some() {
-                return Err(ProviderError::permanent(
-                    "put_process_definition",
-                    format!(
-                        "definition {name}@{version} already exists (immutable; use force or a new version)"
-                    ),
-                ));
-            }
+        if !force && self.get_process_definition(name, version).await?.is_some() {
+            return Err(ProviderError::permanent(
+                "put_process_definition",
+                format!(
+                    "definition {name}@{version} already exists (immutable; use force or a new version)"
+                ),
+            ));
         }
 
         let conn = self

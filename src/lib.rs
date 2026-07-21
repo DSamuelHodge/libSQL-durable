@@ -12,9 +12,9 @@ compile_error!(
     "features `compat-sqlite` and `native-libsql` cannot be enabled together because SQLx's bundled SQLite and libsql-ffi both export SQLite C symbols"
 );
 
-mod config;
 #[cfg(feature = "compat-sqlite")]
 mod compat;
+mod config;
 #[cfg(feature = "native-libsql")]
 mod definitions;
 #[cfg(feature = "native-libsql")]
@@ -41,22 +41,20 @@ pub use duroxide;
 pub use compat::CompatSqliteProvider;
 #[cfg(feature = "native-libsql")]
 pub use definitions::{
-    validate_definition_body, ProcessDefinition, ProcessDefinitionPin, PVM_DEF_V1,
+    PVM_DEF_V1, ProcessDefinition, ProcessDefinitionPin, validate_definition_body,
 };
 #[cfg(feature = "native-libsql")]
-pub use interpreter::{
-    interpreted_orchestrations, wrap_interpret_input, INTERPRETED_ORCH_NAME,
-};
-#[cfg(feature = "native-libsql")]
-pub use fork::{discard_world_package, fork_world_files, ForkOptions, ForkResult};
+pub use fork::{ForkOptions, ForkResult, discard_world_package, fork_world_files};
 #[cfg(feature = "native-libsql")]
 pub use heal::{
-    HealActionResult, HealOptions, HealReport, HealingAuditRow, DEFAULT_RUNAWAY_HISTORY_EVENTS,
+    DEFAULT_RUNAWAY_HISTORY_EVENTS, HealActionResult, HealOptions, HealReport, HealingAuditRow,
 };
 #[cfg(feature = "native-libsql")]
+pub use interpreter::{INTERPRETED_ORCH_NAME, interpreted_orchestrations, wrap_interpret_input};
+#[cfg(feature = "native-libsql")]
 pub use introspect::{
-    BlockReason, NextWorkItem, ProcessRow, QueueSnapshot, TraceEvent, WhyBlocked, WorkQueueKind,
-    WorldHealth, DEFAULT_POISON_ATTEMPT_THRESHOLD,
+    BlockReason, DEFAULT_POISON_ATTEMPT_THRESHOLD, NextWorkItem, ProcessRow, QueueSnapshot,
+    TraceEvent, WhyBlocked, WorkQueueKind, WorldHealth,
 };
 #[cfg(feature = "native-libsql")]
 pub use mesh::{MeshStatus, WorldPeer, WorldRef};
@@ -66,8 +64,8 @@ pub use native::{NativeLibsqlProvider, ProviderTuning};
 pub use policy::{PolicyAuditRow, RuntimePolicy};
 #[cfg(feature = "native-libsql")]
 pub use world::{
-    copy_world_package, open_world_checklist, WorldManifest, WorldOpenReport, WorldPackagePaths,
-    MIN_COMPATIBLE_SCHEMA_VERSION, SCHEMA_VERSION, WORLD_FORMAT_VERSION,
+    MIN_COMPATIBLE_SCHEMA_VERSION, SCHEMA_VERSION, WORLD_FORMAT_VERSION, WorldManifest,
+    WorldOpenReport, WorldPackagePaths, copy_world_package, open_world_checklist,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -81,7 +79,9 @@ pub enum LibsqlProviderInitError {
     #[cfg(feature = "compat-sqlite")]
     #[error("remote/offline libSQL backends require the native libSQL transaction port")]
     RemoteNativePortRequired,
-    #[error("local encryption was requested but the crate was built without the `encryption` feature")]
+    #[error(
+        "local encryption was requested but the crate was built without the `encryption` feature"
+    )]
     EncryptionFeatureDisabled,
     #[error("no provider backend feature is enabled")]
     NoBackendFeatureEnabled,
@@ -144,9 +144,7 @@ impl LibsqlProvider {
         auth_token: impl Into<String>,
     ) -> Result<Self, LibsqlProviderInitError> {
         Self::new(LibsqlDatabaseConfig::remote_replica(
-            local_path,
-            remote_url,
-            auth_token,
+            local_path, remote_url, auth_token,
         ))
         .await
     }
@@ -159,9 +157,7 @@ impl LibsqlProvider {
         auth_token: impl Into<String>,
     ) -> Result<Self, LibsqlProviderInitError> {
         Self::new(LibsqlDatabaseConfig::offline_synced(
-            local_path,
-            remote_url,
-            auth_token,
+            local_path, remote_url, auth_token,
         ))
         .await
     }
@@ -616,12 +612,7 @@ impl LibsqlProvider {
         match self {
             Self::Native(provider) => {
                 provider
-                    .add_world_ref(
-                        local_instance_id,
-                        remote_world_id,
-                        remote_instance_id,
-                        note,
-                    )
+                    .add_world_ref(local_instance_id, remote_world_id, remote_instance_id, note)
                     .await
             }
         }
@@ -667,10 +658,7 @@ impl LibsqlProvider {
 
     /// Query arbitrary SQL; returns rows as text cells (NULL → None).
     #[cfg(feature = "native-libsql")]
-    pub async fn query_sql(
-        &self,
-        sql: &str,
-    ) -> Result<Vec<Vec<Option<String>>>, ProviderError> {
+    pub async fn query_sql(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, ProviderError> {
         match self {
             Self::Native(provider) => provider.query_sql(sql).await,
         }

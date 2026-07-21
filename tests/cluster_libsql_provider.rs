@@ -49,9 +49,7 @@ fn unique_suffix() -> String {
 macro_rules! skip_if_no_cluster {
     () => {
         if primary_url().is_none() || replica_url().is_none() {
-            eprintln!(
-                "skipping cluster test: set LIBSQL_REMOTE_URL and LIBSQL_REPLICA_HTTP_URL"
-            );
+            eprintln!("skipping cluster test: set LIBSQL_REMOTE_URL and LIBSQL_REPLICA_HTTP_URL");
             return;
         }
     };
@@ -291,10 +289,9 @@ async fn cluster_remote_tuning_applied_and_retries_transient() {
     let native = primary.native().expect("native");
     let ok = native
         .with_transient_retry("tuning_probe", || async {
-            native
-                .schema_version()
-                .await
-                .map_err(|e| duroxide::providers::ProviderError::retryable("tuning_probe", e.to_string()))
+            native.schema_version().await.map_err(|e| {
+                duroxide::providers::ProviderError::retryable("tuning_probe", e.to_string())
+            })
         })
         .await
         .expect("retry wrapper");
@@ -307,10 +304,7 @@ async fn cluster_concurrent_primary_fetches_respect_locks() {
     let Some(primary) = open_primary().await else {
         return;
     };
-    primary
-        .clear_runtime_data()
-        .await
-        .expect("clear primary");
+    primary.clear_runtime_data().await.expect("clear primary");
 
     let suffix = unique_suffix();
     let instance = format!("cluster-lock-{suffix}");

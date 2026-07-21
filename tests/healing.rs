@@ -79,11 +79,7 @@ async fn reclaim_expired_instance_locks() {
     .unwrap();
 
     let result = p.heal_reclaim_expired_locks().await.unwrap();
-    assert!(
-        result.rows_affected >= 1,
-        "detail={}",
-        result.detail
-    );
+    assert!(result.rows_affected >= 1, "detail={}", result.detail);
 
     let health = p.health(None).await.unwrap();
     assert_eq!(health.expired_locks, 0);

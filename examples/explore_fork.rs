@@ -12,7 +12,7 @@ use std::time::Duration;
 use duroxide::runtime;
 use duroxide::runtime::registry::{ActivityRegistry, OrchestrationRegistry};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationStatus};
-use libsql_durable::{discard_world_package, ForkOptions, LibsqlProvider};
+use libsql_durable::{ForkOptions, LibsqlProvider, discard_world_package};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,8 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .build();
-    let child_rt =
-        runtime::Runtime::start_with_store(child_store.clone(), activities, orch).await;
+    let child_rt = runtime::Runtime::start_with_store(child_store.clone(), activities, orch).await;
     let child_client = Client::new(child_store);
     child_client
         .start_orchestration("speculative", "Echo", "try-this")
@@ -95,7 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Discard speculative world (parent untouched)
     drop(parent);
     discard_world_package(&child_path)?;
-    println!("discarded child package; parent still at {}", parent_path.display());
+    println!(
+        "discarded child package; parent still at {}",
+        parent_path.display()
+    );
     assert!(parent_path.exists());
     assert!(!child_path.exists());
     Ok(())

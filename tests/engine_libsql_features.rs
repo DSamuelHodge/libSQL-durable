@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use duroxide::providers::Provider;
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
-use libsql_durable::{
-    LibsqlDatabaseConfig, LibsqlEngineOptions, LibsqlProvider, SCHEMA_VERSION,
-};
+use libsql_durable::{LibsqlDatabaseConfig, LibsqlEngineOptions, LibsqlProvider, SCHEMA_VERSION};
 
 fn started(instance: &str) -> Event {
     Event::with_event_id(
@@ -106,9 +104,10 @@ async fn engine_options_are_retained_on_provider() {
         .with_read_your_writes(true)
         .with_remote_writes(false);
 
-    let provider = LibsqlProvider::new(LibsqlDatabaseConfig::local(&path).with_options(options.clone()))
-        .await
-        .expect("open");
+    let provider =
+        LibsqlProvider::new(LibsqlDatabaseConfig::local(&path).with_options(options.clone()))
+            .await
+            .expect("open");
     let retained = provider.engine_options().expect("native options");
     assert_eq!(retained.namespace.as_deref(), Some("tenant-demo"));
     assert_eq!(retained.sync_interval, Some(Duration::from_secs(3)));

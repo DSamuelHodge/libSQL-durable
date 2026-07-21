@@ -7,8 +7,8 @@ use duroxide::runtime;
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::{ActivityContext, Client, OrchestrationStatus};
 use libsql_durable::{
-    interpreted_orchestrations, validate_definition_body, wrap_interpret_input, LibsqlProvider,
-    INTERPRETED_ORCH_NAME, PVM_DEF_V1,
+    INTERPRETED_ORCH_NAME, LibsqlProvider, PVM_DEF_V1, interpreted_orchestrations,
+    validate_definition_body, wrap_interpret_input,
 };
 
 fn stock_activities() -> ActivityRegistry {
@@ -16,9 +16,10 @@ fn stock_activities() -> ActivityRegistry {
         .register("echo", |_ctx: ActivityContext, input: String| async move {
             Ok(input)
         })
-        .register("prefix", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("P:{input}"))
-        })
+        .register(
+            "prefix",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("P:{input}")) },
+        )
         .build()
 }
 
