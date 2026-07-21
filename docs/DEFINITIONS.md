@@ -45,9 +45,44 @@ let def = provider.resolve_definition_for_instance("inst-1").await?;
 | `set_kv` | `key`, `value`, `next` | `set_kv_value` |
 | `set_status` | `value`, `next` | `set_custom_status` |
 | `goto` | `target` | jump to step id |
+| `if` | `cond`, `then`, `else` | branch on journaled vars only |
+| `select` | `arms` (exactly 2), `out?` | `select2` race (timer / wait / activity) |
 | `return` | `value` | complete process |
 
 `$input` and `$var` substitute from process input / prior `out` bindings.
+
+### `if` conditions
+
+```json
+{ "id": "b", "op": "if", "cond": "$flag", "then": "yes", "else": "no" }
+{ "id": "b", "op": "if", "cond": {"eq": ["$x", "ok"]}, "then": "yes", "else": "no" }
+{ "id": "b", "op": "if", "cond": {"neq": ["$x", ""]}, "then": "yes", "else": "no" }
+{ "id": "b", "op": "if", "cond": {"truthy": "$x"}, "then": "yes", "else": "no" }
+```
+
+Truthy string: non-empty and not `0` / `false` / `null` / `no` (case-insensitive).
+
+**Determinism:** branches only on values already in the var map (from input or prior journaled steps). No wall-clock or host I/O in `cond`.
+
+### `select` (exactly two arms)
+
+```json
+{
+  "id": "race",
+  "op": "select",
+  "out": "payload",
+  "arms": [
+    { "kind": "timer", "ms": 5000, "value": "timeout", "next": "on_timeout" },
+    { "kind": "wait", "event": "HumanApproval", "out": "ev", "next": "on_human" }
+  ]
+}
+```
+
+Arm `kind`: `timer` | `wait` | `activity`. Winner sets step `out` and optional arm `out`;  
+`$select_winner` is `"0"` or `"1"`. Loser work is cancelled by Duroxide select semantics.
+
+**Loops:** use `if` + `goto` (or body that returns to a loop step) with a counter/var;  
+the interpreter caps total steps at 10_000 per execution.
 
 Bodies with `"schema":"pvm.def.v1"` are **structurally validated** on put.
 Opaque JSON without that schema remains allowed for host-defined formats.

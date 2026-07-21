@@ -32,6 +32,19 @@ pub struct ProcessDefinitionPin {
 /// Schema id for the portable step IR interpreted by the host.
 pub const PVM_DEF_V1: &str = "pvm.def.v1";
 
+/// Ops accepted by `pvm.def.v1` (additive; hosts ignore unknown only if schema not set).
+pub const PVM_DEF_V1_OPS: &[&str] = &[
+    "activity",
+    "timer",
+    "wait",
+    "set_kv",
+    "set_status",
+    "return",
+    "goto",
+    "if",
+    "select",
+];
+
 /// Validate `body_json`. Always requires valid JSON.
 /// If `schema` is `"pvm.def.v1"`, enforce the step IR contract.
 pub fn validate_definition_body(body_json: &str) -> Result<(), String> {
@@ -96,9 +109,72 @@ pub fn validate_definition_body(body_json: &str) -> Result<(), String> {
                 }
             }
             "set_status" | "return" | "goto" => {}
+            "if" => {
+                if s.get("cond").is_none() {
+                    return Err(format!("steps[{i}] if requires `cond`"));
+                }
+                if s.get("then").and_then(|x| x.as_str()).is_none() {
+                    return Err(format!("steps[{i}] if requires string `then`"));
+                }
+                // else optional — falls through to next if absent? require else for clarity
+                if s.get("else").and_then(|x| x.as_str()).is_none() {
+                    return Err(format!("steps[{i}] if requires string `else`"));
+                }
+                validate_cond(s.get("cond"), i)?;
+            }
+            "select" => {
+                let arms = s
+                    .get("arms")
+                    .and_then(|a| a.as_array())
+                    .ok_or_else(|| format!("steps[{i}] select requires array `arms`"))?;
+                if arms.len() != 2 {
+                    return Err(format!(
+                        "steps[{i}] select requires exactly 2 arms (select2) in v1"
+                    ));
+                }
+                for (j, arm) in arms.iter().enumerate() {
+                    let a = arm
+                        .as_object()
+                        .ok_or_else(|| format!("steps[{i}].arms[{j}] must be object"))?;
+                    let kind = a
+                        .get("kind")
+                        .and_then(|k| k.as_str())
+                        .ok_or_else(|| format!("steps[{i}].arms[{j}] requires `kind`"))?;
+                    match kind {
+                        "timer" => {
+                            if a.get("ms").and_then(|m| m.as_u64()).is_none() {
+                                return Err(format!(
+                                    "steps[{i}].arms[{j}] timer requires numeric `ms`"
+                                ));
+                            }
+                        }
+                        "wait" => {
+                            if a.get("event").and_then(|e| e.as_str()).is_none() {
+                                return Err(format!("steps[{i}].arms[{j}] wait requires `event`"));
+                            }
+                        }
+                        "activity" => {
+                            if a.get("name").and_then(|n| n.as_str()).is_none() {
+                                return Err(format!(
+                                    "steps[{i}].arms[{j}] activity requires `name`"
+                                ));
+                            }
+                        }
+                        other => {
+                            return Err(format!(
+                                "steps[{i}].arms[{j}] unknown kind `{other}` (timer|wait|activity)"
+                            ));
+                        }
+                    }
+                    if a.get("next").and_then(|n| n.as_str()).is_none() {
+                        return Err(format!("steps[{i}].arms[{j}] requires string `next`"));
+                    }
+                }
+            }
             other => {
                 return Err(format!(
-                    "steps[{i}] unknown op `{other}` (allowed: activity, timer, wait, set_kv, set_status, return, goto)"
+                    "steps[{i}] unknown op `{other}` (allowed: {})",
+                    PVM_DEF_V1_OPS.join(", ")
                 ));
             }
         }
@@ -106,7 +182,75 @@ pub fn validate_definition_body(body_json: &str) -> Result<(), String> {
     if !ids.contains(entry) {
         return Err(format!("entry `{entry}` not found in steps"));
     }
+    // Cross-check if/select targets exist
+    for step in steps {
+        let s = step.as_object().unwrap();
+        let op = s.get("op").and_then(|o| o.as_str()).unwrap_or("");
+        if op == "if" {
+            for key in ["then", "else"] {
+                if let Some(t) = s.get(key).and_then(|x| x.as_str())
+                    && !ids.contains(t)
+                {
+                    return Err(format!("if `{key}` target `{t}` not found in steps"));
+                }
+            }
+        }
+        if op == "select"
+            && let Some(arms) = s.get("arms").and_then(|a| a.as_array())
+        {
+            for arm in arms {
+                if let Some(t) = arm.get("next").and_then(|n| n.as_str())
+                    && !ids.contains(t)
+                {
+                    return Err(format!("select arm next `{t}` not found in steps"));
+                }
+            }
+        }
+        if op == "goto"
+            && let Some(t) = s.get("target").and_then(|x| x.as_str())
+            && !ids.contains(t)
+        {
+            return Err(format!("goto target `{t}` not found in steps"));
+        }
+        if let Some(n) = s.get("next").and_then(|x| x.as_str())
+            && !ids.contains(n)
+            && op != "return"
+            && op != "if"
+            && op != "select"
+            && op != "goto"
+        {
+            return Err(format!("next target `{n}` not found in steps"));
+        }
+    }
     Ok(())
+}
+
+fn validate_cond(cond: Option<&JsonValue>, step_i: usize) -> Result<(), String> {
+    let Some(cond) = cond else {
+        return Err(format!("steps[{step_i}] if requires `cond`"));
+    };
+    if cond.is_string() {
+        return Ok(());
+    }
+    if let Some(obj) = cond.as_object() {
+        if obj.contains_key("eq") || obj.contains_key("neq") {
+            let key = if obj.contains_key("eq") { "eq" } else { "neq" };
+            let arr = obj
+                .get(key)
+                .and_then(|a| a.as_array())
+                .ok_or_else(|| format!("steps[{step_i}] cond.{key} must be a 2-element array"))?;
+            if arr.len() != 2 {
+                return Err(format!("steps[{step_i}] cond.{key} must have length 2"));
+            }
+            return Ok(());
+        }
+        if obj.contains_key("truthy") {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "steps[{step_i}] cond must be a string ($var), or {{eq|neq:[a,b]}}, or {{truthy:\"$var\"}}"
+    ))
 }
 
 impl NativeLibsqlProvider {

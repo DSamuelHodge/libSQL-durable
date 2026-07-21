@@ -19,7 +19,7 @@ use duroxide::runtime;
 use duroxide::runtime::registry::{ActivityRegistry, OrchestrationRegistry};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationStatus};
 use libsql_durable::{
-    discard_world_package, promote_world_package, ForkOptions, LibsqlProvider, PromoteOptions,
+    ForkOptions, LibsqlProvider, PromoteOptions, discard_world_package, promote_world_package,
 };
 
 #[tokio::main]
@@ -98,10 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert!(result.backup_path.exists());
             assert!(!child_path.exists());
             let promoted = LibsqlProvider::new_local(&parent_path).await?;
-            assert_eq!(
-                promoted.world_manifest().await?.unwrap().world_id,
-                child_id
-            );
+            assert_eq!(promoted.world_manifest().await?.unwrap().world_id, child_id);
             let bak = LibsqlProvider::new_local(&result.backup_path).await?;
             assert_eq!(bak.world_manifest().await?.unwrap().world_id, parent_id);
         }

@@ -699,6 +699,37 @@ use libsql_durable::{
 
 **Exit test:** two definition versions, **same host binary**, different behavior.
 
+**Richer control flow (still data):**
+
+```json
+{
+  "schema": "pvm.def.v1",
+  "entry": "race",
+  "steps": [
+    {
+      "id": "race",
+      "op": "select",
+      "out": "payload",
+      "arms": [
+        { "kind": "timer", "ms": 5000, "value": "timeout", "next": "after" },
+        { "kind": "wait", "event": "HumanApproval", "next": "after" }
+      ]
+    },
+    {
+      "id": "after",
+      "op": "if",
+      "cond": {"eq": ["$payload", "timeout"]},
+      "then": "timed",
+      "else": "ok"
+    },
+    { "id": "timed", "op": "return", "value": "timed-out" },
+    { "id": "ok", "op": "return", "value": "$payload" }
+  ]
+}
+```
+
+`if` + `goto` also implements bounded loops (interpreter caps 10k steps). See [`docs/DEFINITIONS.md`](./docs/DEFINITIONS.md).
+
 ---
 
 ## Recipe 13 — Subagent explore = world fork (discard or promote)
