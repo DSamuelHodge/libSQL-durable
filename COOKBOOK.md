@@ -3,6 +3,9 @@
 Practical patterns for pairing **Duroxide** (durable execution) with **native libSQL**
 (local / remote / replica / offline / encrypted).
 
+For the deeper architecture thesis—single-file / replicable **process virtual machine**,
+kernel primitives, invariants, and roadmap—see [`docs/PVM.md`](./docs/PVM.md).
+
 All snippets assume:
 
 ```toml

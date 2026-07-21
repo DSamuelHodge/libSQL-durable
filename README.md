@@ -11,12 +11,16 @@ but it is not an acceptance gate for this crate.
 
 **Use-case cookbook:** see [`COOKBOOK.md`](./COOKBOOK.md) for practical recipes
 (local, multi-worker `sqld`, embedded replica, offline sync, encryption,
-multi-tenant, AI/agents, day-2 ops).
+multi-tenant, day-2 ops, durable process demos).
 
-**Runnable agent example (Recipe 10):**
+**Architecture thesis (Process Virtual Machine):** see [`docs/PVM.md`](./docs/PVM.md).
+
+**Runnable process demos:**
 
 ```sh
 cargo run --example agent_loop --no-default-features --features native-libsql
+# real model syscalls (needs NVIDIA_API_KEY):
+# cargo run --example agent_nvidia --no-default-features --features native-libsql
 ```
 
 ## Prerequisites
