@@ -16,6 +16,8 @@ mod config;
 #[cfg(feature = "compat-sqlite")]
 mod compat;
 #[cfg(feature = "native-libsql")]
+mod heal;
+#[cfg(feature = "native-libsql")]
 mod introspect;
 #[cfg(feature = "native-libsql")]
 mod native;
@@ -27,6 +29,10 @@ pub use duroxide;
 
 #[cfg(feature = "compat-sqlite")]
 pub use compat::CompatSqliteProvider;
+#[cfg(feature = "native-libsql")]
+pub use heal::{
+    HealActionResult, HealOptions, HealReport, HealingAuditRow, DEFAULT_RUNAWAY_HISTORY_EVENTS,
+};
 #[cfg(feature = "native-libsql")]
 pub use introspect::{
     BlockReason, NextWorkItem, ProcessRow, QueueSnapshot, TraceEvent, WhyBlocked, WorkQueueKind,
@@ -261,6 +267,71 @@ impl LibsqlProvider {
     ) -> Result<WorldHealth, ProviderError> {
         match self {
             Self::Native(provider) => provider.introspect_health(poison_attempt_threshold).await,
+        }
+    }
+
+    /// Run standard healing suite (reclaim, quarantine, fence orphans, compact).
+    #[cfg(feature = "native-libsql")]
+    pub async fn heal(&self, options: HealOptions) -> Result<HealReport, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.heal(options).await,
+        }
+    }
+
+    /// Reclaim expired instance and queue locks.
+    #[cfg(feature = "native-libsql")]
+    pub async fn heal_reclaim_expired_locks(&self) -> Result<HealActionResult, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.heal_reclaim_expired_locks().await,
+        }
+    }
+
+    /// Quarantine poison queue items above attempt threshold.
+    #[cfg(feature = "native-libsql")]
+    pub async fn heal_quarantine_poison(
+        &self,
+        attempt_threshold: Option<i64>,
+    ) -> Result<HealActionResult, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.heal_quarantine_poison(attempt_threshold).await,
+        }
+    }
+
+    /// Delete queue/lock rows for missing instances (post force-delete fence).
+    #[cfg(feature = "native-libsql")]
+    pub async fn heal_fence_orphan_queue_items(&self) -> Result<HealActionResult, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.heal_fence_orphan_queue_items().await,
+        }
+    }
+
+    /// Compact runaway histories via prune policy.
+    #[cfg(feature = "native-libsql")]
+    pub async fn heal_compact_histories(
+        &self,
+        options: &HealOptions,
+    ) -> Result<HealActionResult, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.heal_compact_histories(options).await,
+        }
+    }
+
+    /// Recent healing audit log (newest first).
+    #[cfg(feature = "native-libsql")]
+    pub async fn healing_audit_log(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<HealingAuditRow>, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.healing_audit_log(limit).await,
+        }
+    }
+
+    /// Count quarantined work items.
+    #[cfg(feature = "native-libsql")]
+    pub async fn healing_quarantine_count(&self) -> Result<u64, ProviderError> {
+        match self {
+            Self::Native(provider) => provider.healing_quarantine_count().await,
         }
     }
 

@@ -15,8 +15,8 @@ multi-tenant, day-2 ops, durable process demos).
 
 **Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
 We are finishing a durable process kernel (world + journal + syscalls), not only a storage adapter.  
-**Phase 1 (world packaging):** [`docs/WORLD_PACKAGE.md`](./docs/WORLD_PACKAGE.md).  
-**Phase 2 (introspection):** [`docs/INTROSPECTION.md`](./docs/INTROSPECTION.md) — `ps` / `next` / `why_blocked` / `trace` / `queues` / `health`.
+**PVM v1 (phases 0–3) complete:**  
+[World packaging](./docs/WORLD_PACKAGE.md) · [Introspection](./docs/INTROSPECTION.md) · [Healing](./docs/HEALING.md) · [PVM spec](./docs/PVM.md)
 
 **Runnable process demos:**
 

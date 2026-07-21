@@ -443,6 +443,8 @@ Policies (examples):
 
 **Rule:** healing actions that change world state should themselves be auditable (table or events).
 
+**Status: implemented in-tree** — `src/heal.rs`, [`HEALING.md`](./HEALING.md), `tests/healing.rs`.
+
 **Exit criteria:** common failure classes recover without human SQL.
 
 ### Phase 4 — Process definitions as data
@@ -535,16 +537,14 @@ Design for **many small durable processes**, not one mega-process writing contin
 | Practical patterns | [`COOKBOOK.md`](../COOKBOOK.md) |
 | Runnable process demos | `examples/agent_loop.rs`, `examples/agent_nvidia.rs` (syscalls = activities) |
 
-**Honest position:** Phases **0–2** implemented in-tree; Phase **3** (healing) remains for PVM v1.
+**Honest position:** **PVM v1 (Phases 0–3) implemented in-tree.** Horizon is Phases 4–7.
 
 | Target | Scope | Status |
 |---|---|---|
-| **PVM v1** | Phases 0–3 | **In progress** — Phase 3 next |
-| **PVM horizon** | Phases 4–7 | Direction after v1 |
+| **PVM v1** | Phases 0–3 | **Complete** |
+| **PVM horizon** | Phases 4–7 | Next ambitions (definitions-as-data, fork, adaptive, mesh) |
 
-**Next build order for v1:** ~~Phase 1~~ → ~~Phase 2~~ → **Phase 3 (healing)**.
-
-**Phase 1:** [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) · **Phase 2:** [`INTROSPECTION.md`](./INTROSPECTION.md)
+**Phase 1:** [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) · **Phase 2:** [`INTROSPECTION.md`](./INTROSPECTION.md) · **Phase 3:** [`HEALING.md`](./HEALING.md)
 
 ---
 
