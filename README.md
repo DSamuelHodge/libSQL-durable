@@ -13,7 +13,8 @@ but it is not an acceptance gate for this crate.
 (local, multi-worker `sqld`, embedded replica, offline sync, encryption,
 multi-tenant, day-2 ops, durable process demos).
 
-**Architecture thesis (Process Virtual Machine):** see [`docs/PVM.md`](./docs/PVM.md).
+**Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
+We are finishing a durable process kernel (world + journal + syscalls), not only a storage adapter.
 
 **Runnable process demos:**
 

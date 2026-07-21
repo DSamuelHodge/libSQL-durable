@@ -1,8 +1,21 @@
 # Process Virtual Machine (PVM) Spec
 
-**Status:** architectural thesis + roadmap  
-**Scope:** what `libsql-durable` is becoming, not only what the crate is today  
+**Status:** architectural thesis + **active build target**  
+**Scope:** what we are finishing — the PVM — not only what the crate is today  
 **Audience:** maintainers and systems designers
+
+### Build mission
+
+> **Finish building the PVM.**  
+> `libsql-durable` is not “done” when it is a good Duroxide provider.  
+> It is done when it is a credible **durable kernel** for a log-structured process virtual machine:  
+> one world (file or replicated topology), disposable host CPU, journal as truth, activities as syscalls,  
+> and processes/subprocesses/forks as the only concurrency model that matters.
+
+**PVM v1 (ship definition):** Phases **0–3** complete — durable kernel world, world packaging, introspection language, healing policies.  
+**PVM horizon:** Phases **4–7** — definitions as data, fork/time-travel, adaptive policy, world mesh.
+
+Agents, harnesses, and multi-agent products are **not** separate build tracks. They collapse into processes, syscalls, and world forks on this machine.
 
 This document defines a **log-structured, single-file (or replicable) process virtual machine** built from:
 
@@ -518,8 +531,14 @@ Design for **many small durable processes**, not one mega-process writing contin
 | Practical patterns | [`COOKBOOK.md`](../COOKBOOK.md) |
 | Runnable process demos | `examples/agent_loop.rs`, `examples/agent_nvidia.rs` (syscalls = activities) |
 
-**Honest position:** this crate is **Phase 0** (durable kernel world) with partial Phase 1–2 substrate (migrate/version, admin, multi-topology open). Phases 4–7 are direction, not claims of completion.
+**Honest position:** this crate is **Phase 0** (durable kernel world) with partial Phase 1–2 substrate (migrate/version, admin, multi-topology open).  
 
+| Target | Scope | Status |
+|---|---|---|
+| **PVM v1** | Phases 0–3 | **In progress** — finish this |
+| **PVM horizon** | Phases 4–7 | Direction after v1 |
+
+**Next build order for v1:** Phase 1 (world packaging) → Phase 2 (introspection) → Phase 3 (healing).
 ---
 
 ## 13. Non-goals (explicit)
