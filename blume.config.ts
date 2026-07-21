@@ -1,23 +1,23 @@
 import { defineConfig } from "blume";
 
 /**
- * Blume docs site for libsql-durable / PVM.
+ * PVM / World kernel docs (Blume).
  *
- * Content: `docs/` (Markdown + MDX)
- * Search: Orama (local, zero hosted service)
- * Deploy: static `dist/` — any CDN / GitHub Pages / Vercel
- *
- * Commands:
- *   npm run docs:dev
- *   npm run docs:build
- *   npm run docs:preview
+ * Product story first. Implementation crate name is secondary.
  */
 export default defineConfig({
-  title: "libsql-durable",
+  title: "PVM",
   description:
-    "Process Virtual Machine kernel for Duroxide: durable worlds on libSQL — one file, disposable host, journal as truth.",
+    "Process Virtual Machine — the World substrate for durable processes. Departure from agent frameworks and harness stacks. Mesh (multi-verse) next.",
   logo: {
-    text: "libsql-durable",
+    text: "PVM",
+  },
+
+  banner: {
+    content:
+      "Team / pre-public — product language first. Public brand launch not ready. Features live in Features & Get started.",
+    dismissible: true,
+    id: "pre-public-pvm",
   },
 
   content: {
@@ -38,7 +38,6 @@ export default defineConfig({
     mode: "system",
   },
 
-  // Local search index (built into dist/) — no external service required.
   search: {
     provider: "orama",
   },
@@ -62,13 +61,9 @@ export default defineConfig({
     structuredData: true,
   },
 
-  // GitHub Pages project site:
-  //   https://dsamuelhodge.github.io/libSQL-durable/
-  // `base` is required for asset/link rewriting under the repo subpath.
   deployment: {
     output: "static",
     site: "https://dsamuelhodge.github.io/libSQL-durable",
     base: "/libSQL-durable",
   },
 });
-

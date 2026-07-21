@@ -1,26 +1,33 @@
 import { defineMeta } from "blume";
 
 /**
- * Sidebar order. Names match content basenames under `docs/`
- * (without extension).
+ * Product-first navigation.
+ * Reference/kernel docs sit under "Reference" — not the landing story.
  */
 export default defineMeta({
   pages: [
+    // Product surface
     "index",
-    "why",
-    "PVM",
+    "vision",
+    "features",
+    "get-started",
     "---",
+    // Core capabilities (benefit-shaped entry → deep docs)
     "WORLD_PACKAGE",
-    "INTROSPECTION",
-    "HEALING",
+    "RUNTIME",
     "DEFINITIONS",
     "FORK",
-    "POLICY",
     "MESH",
     "---",
-    "RUNTIME",
+    // Operator / day-2
+    "INTROSPECTION",
+    "HEALING",
+    "POLICY",
     "SYSCALLS",
+    "---",
+    // Team recipes + deep architecture
     "cookbook",
+    "PVM",
     "COLLAPSE_PR_PLAN",
     "changelog",
   ],

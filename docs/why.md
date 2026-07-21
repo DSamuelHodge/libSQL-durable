@@ -1,7 +1,10 @@
 ---
 title: Why anyone should care
-description: Target audiences, use cases, and why libsql-durable is not another agent framework.
+description: Who the World kernel is for — and why it is not another agent framework.
 ---
+
+> Prefer the product spine: [Vision](/vision) · [Features](/features) · [Get started](/get-started).  
+> This page is the audience map.
 
 ## Target audiences
 
@@ -9,7 +12,7 @@ description: Target audiences, use cases, and why libsql-durable is not another 
 
 People shipping agents that must survive restarts, tool failures, and multi-step plans — without reinventing queues, journals, and “harness” glue.
 
-**They care because:** agent = process, tools = syscalls, memory = same world file — simpler than framework + runner + memory service + workflow engine + DB.
+**They care because:** agent = **process**, tools = **syscalls**, memory = **same world** — not framework + runner + memory service + workflow engine + DB.
 
 ### 2. Backend / platform engineers (durable execution)
 

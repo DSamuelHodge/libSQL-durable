@@ -1,24 +1,24 @@
-# libSQL Durable Provider
+# PVM — World kernel (`libsql-durable`)
 
-**Version 0.2.0** — PVM kernel + collapse finish line (host binary, definitions IR, fork/promote).  
-See [`CHANGELOG.md`](./CHANGELOG.md).
+**Product:** Process Virtual Machine — durable **Worlds** as computers.  
+**Crate name:** `libsql-durable` (implementation). **Not** a libSQL/Duroxide promo.  
+**Status:** team / pre-public — brand launch not ready.  
+**Version:** 0.2.0 · [`CHANGELOG.md`](./CHANGELOG.md)
 
-This crate exposes a reusable native local + self-hosted libSQL durable
-execution provider for [Duroxide](https://docs.rs/duroxide/latest/duroxide/).
-It is intended for projects that want Duroxide orchestration state stored in
-embedded libSQL files or self-hosted `sqld`/`libsql-server`.
+> Agent frameworks and harness stacks were converging on a process VM.  
+> **PVM is that machine.** **World Mesh (multi-verse)** is next.
 
-It does not require managed Turso Cloud. Remote mode targets self-hosted libSQL
-servers; managed hosting can be layered on by downstream projects if they choose,
-but it is not an acceptance gate for this crate.
-
-**Use-case cookbook:** see [`COOKBOOK.md`](./COOKBOOK.md) for practical recipes
-(local, multi-worker `sqld`, embedded replica, offline sync, encryption,
-multi-tenant, day-2 ops, durable process demos).
+| Read first | |
+|---|---|
+| Vision | [docs/vision.md](./docs/vision.md) |
+| Features & benefits | [docs/features.md](./docs/features.md) |
+| Get started (team) | [docs/get-started.md](./docs/get-started.md) |
 
 **Docs site (Blume → GitHub Pages):**  
 https://dsamuelhodge.github.io/libSQL-durable/
 
+This repository implements the **World substrate (kernel)** using libSQL as the
+ACID medium and Duroxide as the replay engine. Those are **engines**, not the brand.
 ```sh
 npm install
 npm run docs:dev       # local hot reload + Orama search

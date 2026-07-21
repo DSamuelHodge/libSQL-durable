@@ -1,52 +1,68 @@
 ---
-title: Introduction
-description: Durable process kernel for Duroxide — one world file, disposable host, journal as truth.
+title: PVM — Process Virtual Machine
+description: The World substrate for durable processes. A departure from agent frameworks and harness stacks.
 ---
 
-**libsql-durable** is the durable kernel-state layer of a log-structured **Process Virtual Machine (PVM)** whose entire world can live in one libSQL file — and whose CPU can be thrown away at any time.
+:::banner
+**Team / pre-public surface.** Branding and public launch are not finished.  
+This site teaches the **product language** (PVM · World · Mesh) so features are usable — not buried in code.
+:::
+
+# The computer was always the missing product
+
+Agent frameworks and harness stacks keep growing layers.  
+They were **converging on a process virtual machine**. We build that machine explicitly.
 
 ## One sentence
 
-> Open one world file → the whole machine is there: processes, schedule, memory, durability, ops, fork/explore, and promote.
+> A **World** is a durable computer. A **host** is disposable CPU.  
+> **Processes** are the unit of work. **Syscalls** are the only non-determinism.  
+> **Fork** is how you explore. **Mesh** is how many worlds become a multi-verse.
 
-## Start here
+## Not another stack
 
-| Topic | Link |
+| Stack word | Here |
 |---|---|
-| Why anyone should care | [Audiences & use cases](/why) |
-| Architecture thesis | [PVM](/PVM) |
-| One-binary host | [Runtime (`pvm`)](/RUNTIME) |
-| Practical recipes | [Cookbook](/cookbook) |
-| Fork / promote | [Fork](/FORK) |
-| Definitions IR | [Definitions](/DEFINITIONS) |
+| Agent framework | **PVM processes** on a World |
+| Harness / runner | **Host** (`pvm` or your binary) |
+| Memory service | **Same world** (KV + tables) |
+| Subagent sandbox | **Forked world** (or child process) |
+| Multi-agent platform | **Mesh of worlds** (next) |
 
-## Install (Rust crate)
+We **borrowed** libSQL (medium) and Duroxide (replay). We are **not** promoting those projects as the product.  
+They are engines inside a **World kernel**.
 
-```toml
-[dependencies]
-libsql-durable = { git = "https://github.com/DSamuelHodge/libSQL-durable", default-features = false, features = ["native-libsql"] }
-duroxide = "0.1.29"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-```
+## What you can do today
 
-```sh
-# Host binary
-cargo run --bin pvm --no-default-features --features native-libsql -- health --world ./world.db
-```
+| Benefit | Capability |
+|---|---|
+| Survive host death | Journal primacy |
+| Debug stuck work | Health / ps / why / trace |
+| Recover failures | Healing + audit |
+| Change logic as data | Definitions + `if` / `select` |
+| Speculative work safely | Fork → discard / promote |
+| Import only what worked | Selective promote (mesh-friendly) |
+| Name many worlds | Mesh peers & refs (foundation) |
 
-## Docs site (this site)
+**Full catalog:** [Features & benefits](/features)
 
-Built with [Blume](https://useblume.dev), hosted on **GitHub Pages**.  
-Local search (Orama), static HTML, AI-ready `llms.txt`.
+## Paths
 
-```sh
-npm install
-npm run docs:dev      # hot reload
-npm run docs:build    # static dist/ + search index
-npm run docs:preview
-```
+| I am… | Go to |
+|---|---|
+| Onboarding to the team | [Get started](/get-started) |
+| Explaining the product | [Vision](/vision) |
+| Looking for capabilities | [Features & benefits](/features) |
+| Implementing deeply | [PVM architecture](/PVM) · [Cookbook](/cookbook) |
 
-Production: https://dsamuelhodge.github.io/libSQL-durable/
-## Version
+## What’s next
 
-**0.2.0** — PVM kernel + collapse finish line. See [Changelog](/changelog).
+**World Mesh — multi-verse:** many Worlds as an adaptive dynamical system  
+(placement, capability, policy, movement) — not a bigger harness.
+
+See [Vision](/vision) for the full departure story.
+
+## Implementation note
+
+The Rust crate is still named `libsql-durable` (Cargo / git history).  
+**Product name and mental model: PVM · World · Kernel · Mesh.**
