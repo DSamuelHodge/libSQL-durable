@@ -17,6 +17,8 @@ mod config;
 mod compat;
 #[cfg(feature = "native-libsql")]
 mod native;
+#[cfg(feature = "native-libsql")]
+mod world;
 
 pub use config::{LibsqlDatabaseConfig, LibsqlDatabaseMode, LibsqlEngineOptions};
 pub use duroxide;
@@ -24,7 +26,12 @@ pub use duroxide;
 #[cfg(feature = "compat-sqlite")]
 pub use compat::CompatSqliteProvider;
 #[cfg(feature = "native-libsql")]
-pub use native::{NativeLibsqlProvider, ProviderTuning, SCHEMA_VERSION};
+pub use native::{NativeLibsqlProvider, ProviderTuning};
+#[cfg(feature = "native-libsql")]
+pub use world::{
+    copy_world_package, open_world_checklist, WorldManifest, WorldOpenReport, WorldPackagePaths,
+    MIN_COMPATIBLE_SCHEMA_VERSION, SCHEMA_VERSION, WORLD_FORMAT_VERSION,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LibsqlProviderInitError {
@@ -43,6 +50,9 @@ pub enum LibsqlProviderInitError {
     NoBackendFeatureEnabled,
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+    /// World package failed the version fence (schema/format too new or too old).
+    #[error("world incompatible with this host: {0}")]
+    WorldIncompatible(String),
 }
 
 pub enum LibsqlProvider {
@@ -151,7 +161,43 @@ impl LibsqlProvider {
         }
     }
 
-    /// Clear orchestration runtime rows (keeps schema).
+    /// PVM world identity and version fence metadata.
+    #[cfg(feature = "native-libsql")]
+    pub async fn world_manifest(&self) -> Result<Option<WorldManifest>, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.world_manifest().await,
+        }
+    }
+
+    /// Open-world checklist report after migrate.
+    #[cfg(feature = "native-libsql")]
+    pub async fn world_open_report(&self) -> Result<WorldOpenReport, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.world_open_report().await,
+        }
+    }
+
+    /// Best-effort WAL checkpoint (local engines).
+    #[cfg(feature = "native-libsql")]
+    pub async fn checkpoint_wal(&self) -> Result<(), LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.checkpoint_wal().await,
+        }
+    }
+
+    /// Checkpoint then copy a local world package to `dst_db`.
+    #[cfg(feature = "native-libsql")]
+    pub async fn package_copy_to(
+        &self,
+        src_db: impl AsRef<std::path::Path>,
+        dst_db: impl AsRef<std::path::Path>,
+    ) -> Result<WorldPackagePaths, LibsqlProviderInitError> {
+        match self {
+            Self::Native(provider) => provider.package_copy_to(src_db, dst_db).await,
+        }
+    }
+
+    /// Clear orchestration runtime rows (keeps schema and world_manifest).
     #[cfg(feature = "native-libsql")]
     pub async fn clear_runtime_data(&self) -> Result<(), ProviderError> {
         match self {

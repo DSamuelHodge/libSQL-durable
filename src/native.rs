@@ -557,7 +557,8 @@ impl NativeLibsqlProvider {
     /// Apply durable-provider schema migrations idempotently.
     ///
     /// Safe to call on local files and self-hosted remote `sqld` endpoints.
-    /// Creates/updates tables and records [`SCHEMA_VERSION`] in `schema_meta`.
+    /// Creates/updates tables, records [`SCHEMA_VERSION`], and ensures the
+    /// PVM [`crate::WorldManifest`] (version fence + world_id).
     pub async fn migrate(&self) -> Result<(), LibsqlProviderInitError> {
         self.create_schema().await?;
         Ok(())
@@ -578,8 +579,109 @@ impl NativeLibsqlProvider {
         }
     }
 
-    async fn create_schema(&self) -> libsql::Result<()> {
+    /// Read the PVM world manifest (identity + version fence metadata).
+    pub async fn world_manifest(
+        &self,
+    ) -> Result<Option<crate::WorldManifest>, LibsqlProviderInitError> {
         let conn = self.connect().await?;
+        crate::world::read_world_manifest(&conn).await
+    }
+
+    /// Open-world checklist report (manifest + fence status).
+    pub async fn world_open_report(&self) -> Result<crate::WorldOpenReport, LibsqlProviderInitError> {
+        let manifest = self
+            .world_manifest()
+            .await?
+            .ok_or_else(|| {
+                LibsqlProviderInitError::InvalidConfig(
+                    "world_manifest missing; call migrate()/open first".into(),
+                )
+            })?;
+        let mut notes = Vec::new();
+        let schema_ok = crate::world::check_schema_fence(manifest.schema_version).is_ok();
+        let format_ok = crate::world::check_format_fence(manifest.world_format_version).is_ok();
+        if !schema_ok {
+            notes.push(format!(
+                "schema_version {} incompatible with host {}",
+                manifest.schema_version, SCHEMA_VERSION
+            ));
+        }
+        if !format_ok {
+            notes.push(format!(
+                "world_format_version {} incompatible with host {}",
+                manifest.world_format_version,
+                crate::WORLD_FORMAT_VERSION
+            ));
+        }
+        if schema_ok && format_ok {
+            notes.push("world fence ok; host may schedule work".into());
+        }
+        Ok(crate::WorldOpenReport {
+            provider_name: manifest.provider_name.clone(),
+            provider_version: manifest.provider_version.clone(),
+            manifest,
+            schema_ok,
+            format_ok,
+            notes,
+        })
+    }
+
+    /// Checkpoint WAL into the main db file (best-effort on local engines).
+    ///
+    /// Call before [`crate::copy_world_package`] when the world was recently written.
+    pub async fn checkpoint_wal(&self) -> Result<(), LibsqlProviderInitError> {
+        let conn = self.connect().await?;
+        // Ignore "unsupported" on pure remote Hrana if pragma is rejected.
+        match conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
+            Ok(mut rows) => {
+                let _ = rows.next().await;
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("unsupported") || msg.contains("ExecuteReturnedRows") {
+                    // Some engines return rows via execute path; try query already done.
+                    Ok(())
+                } else {
+                    // Still attempt execute form for engines that accept it.
+                    match conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
+                        Ok(_) => Ok(()),
+                        Err(e2) => {
+                            let m2 = e2.to_string();
+                            if m2.contains("unsupported") || m2.contains("ExecuteReturnedRows") {
+                                Ok(())
+                            } else {
+                                Err(e2.into())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checkpoint (best-effort) then copy this local world to `dst_db`.
+    ///
+    /// Only valid for file-backed worlds. Remote-only topologies should use
+    /// server-side backup/replication instead.
+    pub async fn package_copy_to(
+        &self,
+        src_db: impl AsRef<std::path::Path>,
+        dst_db: impl AsRef<std::path::Path>,
+    ) -> Result<crate::WorldPackagePaths, LibsqlProviderInitError> {
+        let _ = self.checkpoint_wal().await;
+        crate::copy_world_package(src_db, dst_db)
+    }
+
+    async fn create_schema(&self) -> Result<(), LibsqlProviderInitError> {
+        let conn = self.connect().await?;
+
+        // Fence before destructive meta updates if an existing world is newer.
+        if let Ok(Some(found)) = crate::world::read_world_manifest(&conn).await {
+            crate::world::check_schema_fence(found.schema_version)?;
+            crate::world::check_format_fence(found.world_format_version)?;
+        }
+
         for statement in SCHEMA_STATEMENTS {
             conn.execute(statement, ()).await?;
         }
@@ -594,6 +696,17 @@ impl NativeLibsqlProvider {
             (),
         )
         .await?;
+
+        // If schema_meta already has a future version, refuse.
+        let mut meta_rows = conn
+            .query("SELECT version FROM schema_meta WHERE id = 1", ())
+            .await?;
+        if let Some(row) = meta_rows.next().await? {
+            let found = row.get::<i64>(0)?;
+            crate::world::check_schema_fence(found)?;
+        }
+        drop(meta_rows);
+
         let now_ms = Self::now_millis();
         conn.execute(
             r#"
@@ -604,6 +717,13 @@ impl NativeLibsqlProvider {
                 applied_at_ms = excluded.applied_at_ms
             "#,
             params![SCHEMA_VERSION, now_ms],
+        )
+        .await?;
+
+        let _manifest = crate::world::ensure_world_manifest(
+            &conn,
+            "libsql-native",
+            env!("CARGO_PKG_VERSION"),
         )
         .await?;
         Ok(())
@@ -1032,8 +1152,7 @@ impl NativeLibsqlProvider {
 }
 
 /// Schema revision applied by [`NativeLibsqlProvider::migrate`].
-/// Bump when making backward-compatible DDL additions.
-pub const SCHEMA_VERSION: i64 = 1;
+pub use crate::world::SCHEMA_VERSION;
 
 const SCHEMA_STATEMENTS: &[&str] = &[
     r#"

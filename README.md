@@ -14,7 +14,8 @@ but it is not an acceptance gate for this crate.
 multi-tenant, day-2 ops, durable process demos).
 
 **Build target — Process Virtual Machine (PVM):** see [`docs/PVM.md`](./docs/PVM.md).  
-We are finishing a durable process kernel (world + journal + syscalls), not only a storage adapter.
+We are finishing a durable process kernel (world + journal + syscalls), not only a storage adapter.  
+**Phase 1 (world packaging):** [`docs/WORLD_PACKAGE.md`](./docs/WORLD_PACKAGE.md).
 
 **Runnable process demos:**
 

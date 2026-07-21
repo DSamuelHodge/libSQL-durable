@@ -406,6 +406,8 @@ Phases are **unlocks**, not a feature dump. Each phase changes what the system *
 - Safe copy/resume guidance (checkpoint, no live multi-writer copy)
 - Optional manifest table: runtime semver range, created_at, world_id
 
+**Status: implemented in-tree** — `src/world.rs`, [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md), `tests/world_package.rs`.
+
 **Exit criteria:** copy world file to another machine and resume with a compatible host binary without manual schema surgery.
 
 ### Phase 2 — Introspection language
@@ -539,7 +541,8 @@ Design for **many small durable processes**, not one mega-process writing contin
 | **PVM horizon** | Phases 4–7 | Direction after v1 |
 
 **Next build order for v1:** Phase 1 (world packaging) → Phase 2 (introspection) → Phase 3 (healing).
----
+
+**Phase 1 implementation:** see [`WORLD_PACKAGE.md`](./WORLD_PACKAGE.md) (`world_manifest`, fence, copy/resume APIs).---
 
 ## 13. Non-goals (explicit)
 
