@@ -146,6 +146,8 @@ pub fn check_format_fence(found: i64) -> Result<(), LibsqlProviderInitError> {
 /// - Do **not** copy a live multi-writer world without checkpointing first.
 /// - Prefer [`crate::NativeLibsqlProvider::checkpoint_wal`] then copy, or stop all hosts.
 /// - Destination parent directories are created as needed.
+/// - Uses **copy-on-write / reflink when available** (macOS `cp -c`, Linux
+///   `cp --reflink=auto`), otherwise falls back to a full byte copy.
 pub fn copy_world_package(
     src_db: impl AsRef<Path>,
     dst_db: impl AsRef<Path>,
@@ -169,39 +171,82 @@ pub fn copy_world_package(
         })?;
     }
 
-    fs::copy(&src.db, &dst.db).map_err(|e| {
-        LibsqlProviderInitError::InvalidConfig(format!(
-            "failed to copy {} -> {}: {e}",
-            src.db.display(),
-            dst.db.display()
-        ))
-    })?;
+    copy_file_prefer_cow(&src.db, &dst.db)?;
 
     if src.wal.exists() {
-        fs::copy(&src.wal, &dst.wal).map_err(|e| {
-            LibsqlProviderInitError::InvalidConfig(format!(
-                "failed to copy WAL {} -> {}: {e}",
-                src.wal.display(),
-                dst.wal.display()
-            ))
-        })?;
+        copy_file_prefer_cow(&src.wal, &dst.wal)?;
     } else if dst.wal.exists() {
         let _ = fs::remove_file(&dst.wal);
     }
 
     if src.shm.exists() {
-        fs::copy(&src.shm, &dst.shm).map_err(|e| {
-            LibsqlProviderInitError::InvalidConfig(format!(
-                "failed to copy SHM {} -> {}: {e}",
-                src.shm.display(),
-                dst.shm.display()
-            ))
-        })?;
+        copy_file_prefer_cow(&src.shm, &dst.shm)?;
     } else if dst.shm.exists() {
         let _ = fs::remove_file(&dst.shm);
     }
 
     Ok(dst)
+}
+
+/// Copy a single file, preferring CoW/reflink when the OS/FS supports it.
+pub fn copy_file_prefer_cow(src: &Path, dst: &Path) -> Result<(), LibsqlProviderInitError> {
+    if let Some(parent) = dst.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // Remove destination first so clone/cp can create a fresh inode.
+    if dst.exists() {
+        let _ = fs::remove_file(dst);
+    }
+
+    if try_cow_copy(src, dst) {
+        return Ok(());
+    }
+
+    fs::copy(src, dst).map_err(|e| {
+        LibsqlProviderInitError::InvalidConfig(format!(
+            "failed to copy {} -> {}: {e}",
+            src.display(),
+            dst.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn try_cow_copy(src: &Path, dst: &Path) -> bool {
+    let Some(src_s) = src.to_str() else {
+        return false;
+    };
+    let Some(dst_s) = dst.to_str() else {
+        return false;
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        // APFS clonefile via cp -c
+        if let Ok(status) = std::process::Command::new("cp")
+            .args(["-c", src_s, dst_s])
+            .status()
+            && status.success()
+            && dst.exists()
+        {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::process::Command::new("cp")
+            .args(["--reflink=auto", src_s, dst_s])
+            .status()
+            && status.success()
+            && dst.exists()
+        {
+            return true;
+        }
+    }
+
+    let _ = (src_s, dst_s);
+    false
 }
 
 /// Open checklist used by hosts (and docs) when resuming a world.

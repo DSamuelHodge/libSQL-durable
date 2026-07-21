@@ -74,7 +74,31 @@ cargo run --bin pvm --no-default-features --features native-libsql -- \
   promote --parent ./parent.db --child ./child.db --confirm --discard-child
 ```
 
-**Not in v1:** selective merge of events/KV from child into a live parent (policy B).
+## Selective promote (policy B)
+
+Import **selected instances** from a forked child into a **live parent** without
+replacing the parent file. Parent `world_id` is preserved.
+
+```rust
+use libsql_durable::{selective_promote_instances, SelectivePromoteOptions};
+
+let result = selective_promote_instances(
+    &parent,
+    &child,
+    SelectivePromoteOptions::confirmed(["explore-1", "keep-me"])
+        .with_note("merge explore outcomes"),
+).await?;
+// result.history_events_imported, result.parent_world_id unchanged
+```
+
+For each instance: parent history/executions/kv/pins/queues for that id are
+replaced with the child's rows. Other parent instances are untouched.
+
+| | Policy A (`promote_world_package`) | Policy B (`selective_promote_instances`) |
+|---|---|---|
+| Unit | whole world file | listed instance ids |
+| Parent identity | becomes child file | preserved |
+| Backup | automatic file backup | caller may package_copy first |
 
 ## Operator loop
 

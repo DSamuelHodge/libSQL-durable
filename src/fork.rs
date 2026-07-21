@@ -452,7 +452,440 @@ fn remove_package_files(paths: &WorldPackagePaths) -> Result<(), LibsqlProviderI
     Ok(())
 }
 
+/// Policy B: import selected instances from a forked child into a **live parent**.
+///
+/// Parent `world_id` is preserved. For each listed instance, parent rows are
+/// replaced with the child's history / executions / instance row (and optionally
+/// KV + definition pins). Scheduler rows for those instances are cleared on parent.
+#[derive(Debug, Clone)]
+pub struct SelectivePromoteOptions {
+    pub confirm: bool,
+    pub require_lineage: bool,
+    /// Instance ids to import from child (must be non-empty).
+    pub instance_ids: Vec<String>,
+    pub include_kv: bool,
+    pub include_definition_pins: bool,
+    pub note: Option<String>,
+}
+
+impl Default for SelectivePromoteOptions {
+    fn default() -> Self {
+        Self {
+            confirm: false,
+            require_lineage: true,
+            instance_ids: Vec::new(),
+            include_kv: true,
+            include_definition_pins: true,
+            note: None,
+        }
+    }
+}
+
+impl SelectivePromoteOptions {
+    pub fn confirmed(instance_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            confirm: true,
+            instance_ids: instance_ids.into_iter().map(|s| s.into()).collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectivePromoteResult {
+    pub parent_world_id: String,
+    pub child_world_id: String,
+    pub imported_instances: Vec<String>,
+    pub history_events_imported: u64,
+}
+
+/// Import instance state from child world into parent (policy B).
+///
+/// Requires open providers. Prefer quiescing both worlds (no active dispatchers).
+pub async fn selective_promote_instances(
+    parent: &LibsqlProvider,
+    child: &LibsqlProvider,
+    options: SelectivePromoteOptions,
+) -> Result<SelectivePromoteResult, LibsqlProviderInitError> {
+    if !options.confirm {
+        return Err(LibsqlProviderInitError::InvalidConfig(
+            "selective promote refused: confirm must be true".into(),
+        ));
+    }
+    if options.instance_ids.is_empty() {
+        return Err(LibsqlProviderInitError::InvalidConfig(
+            "selective promote refused: instance_ids empty".into(),
+        ));
+    }
+
+    let parent_native = parent.native().ok_or_else(|| {
+        LibsqlProviderInitError::InvalidConfig("parent not native backend".into())
+    })?;
+    let child_native = child
+        .native()
+        .ok_or_else(|| LibsqlProviderInitError::InvalidConfig("child not native backend".into()))?;
+
+    let parent_manifest = parent.world_manifest().await?.ok_or_else(|| {
+        LibsqlProviderInitError::InvalidConfig("parent world_manifest missing".into())
+    })?;
+    let child_manifest = child.world_manifest().await?.ok_or_else(|| {
+        LibsqlProviderInitError::InvalidConfig("child world_manifest missing".into())
+    })?;
+
+    if options.require_lineage {
+        match &child_manifest.parent_world_id {
+            Some(pid) if pid == &parent_manifest.world_id => {}
+            Some(pid) => {
+                return Err(LibsqlProviderInitError::InvalidConfig(format!(
+                    "selective promote lineage mismatch: child.parent_world_id={pid} parent={}",
+                    parent_manifest.world_id
+                )));
+            }
+            None => {
+                return Err(LibsqlProviderInitError::InvalidConfig(
+                    "selective promote refused: child has no parent_world_id".into(),
+                ));
+            }
+        }
+    }
+
+    let mut history_events_imported = 0u64;
+    let mut imported = Vec::new();
+
+    for instance_id in &options.instance_ids {
+        let n = parent_native
+            .import_instance_from(
+                child_native,
+                instance_id,
+                options.include_kv,
+                options.include_definition_pins,
+            )
+            .await
+            .map_err(|e| {
+                LibsqlProviderInitError::InvalidConfig(format!(
+                    "import instance {instance_id}: {e}"
+                ))
+            })?;
+        history_events_imported += n;
+        imported.push(instance_id.clone());
+    }
+
+    let note = format!(
+        "selective instances={} hist={} {}",
+        imported.join(","),
+        history_events_imported,
+        options.note.as_deref().unwrap_or("")
+    );
+    let _ = parent_native
+        .record_promote_audit(
+            &parent_manifest.world_id,
+            &child_manifest.world_id,
+            "(selective-in-place)",
+            Some(&note),
+        )
+        .await;
+
+    Ok(SelectivePromoteResult {
+        parent_world_id: parent_manifest.world_id,
+        child_world_id: child_manifest.world_id,
+        imported_instances: imported,
+        history_events_imported,
+    })
+}
+
 impl NativeLibsqlProvider {
+    /// Replace one instance's durable rows on `self` with rows from `src`.
+    /// Returns number of history events imported.
+    pub async fn import_instance_from(
+        &self,
+        src: &NativeLibsqlProvider,
+        instance_id: &str,
+        include_kv: bool,
+        include_pins: bool,
+    ) -> Result<u64, ProviderError> {
+        let src_conn = src
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        let dst = self
+            .connect()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+
+        // Prefer instances row; fall back to history-only instances (append without full start).
+        let mut check = src_conn
+            .query(
+                "SELECT orchestration_name, orchestration_version, current_execution_id, custom_status, custom_status_version, parent_instance_id FROM instances WHERE instance_id = ?1",
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        let (orch_name, orch_ver, cur_exec, custom_status, custom_ver, parent_inst) =
+            if let Some(inst) = check
+                .next()
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+            {
+                (
+                    inst.get::<String>(0).unwrap_or_else(|_| "Imported".into()),
+                    inst.get::<String>(1).ok(),
+                    inst.get::<i64>(2).unwrap_or(1),
+                    inst.get::<String>(3).ok(),
+                    inst.get::<i64>(4).unwrap_or(0),
+                    inst.get::<String>(5).ok(),
+                )
+            } else {
+                // History must exist on child.
+                let mut h = src_conn
+                    .query(
+                        "SELECT COUNT(*) FROM history WHERE instance_id = ?1",
+                        params![instance_id],
+                    )
+                    .await
+                    .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+                let n = h
+                    .next()
+                    .await
+                    .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+                    .and_then(|r| r.get::<i64>(0).ok())
+                    .unwrap_or(0);
+                if n == 0 {
+                    return Err(ProviderError::permanent(
+                        "import_instance_from",
+                        format!("instance {instance_id} not found on child (no instances/history)"),
+                    ));
+                }
+                let mut m = src_conn
+                    .query(
+                        "SELECT COALESCE(MAX(execution_id), 1) FROM history WHERE instance_id = ?1",
+                        params![instance_id],
+                    )
+                    .await
+                    .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+                let max_exec = m
+                    .next()
+                    .await
+                    .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+                    .and_then(|r| r.get::<i64>(0).ok())
+                    .unwrap_or(1);
+                (
+                    "Imported".to_string(),
+                    Some("1.0.0".into()),
+                    max_exec,
+                    None,
+                    0,
+                    None,
+                )
+            };
+        drop(check);
+
+        // Clear parent-side instance state (queues/locks first).
+        for sql in [
+            "DELETE FROM orchestrator_queue WHERE instance_id = ?1",
+            "DELETE FROM worker_queue WHERE instance_id = ?1",
+            "DELETE FROM instance_locks WHERE instance_id = ?1",
+            "DELETE FROM history WHERE instance_id = ?1",
+            "DELETE FROM executions WHERE instance_id = ?1",
+            "DELETE FROM kv_store WHERE instance_id = ?1",
+            "DELETE FROM kv_delta WHERE instance_id = ?1",
+            "DELETE FROM process_definition_pins WHERE instance_id = ?1",
+            "DELETE FROM instances WHERE instance_id = ?1",
+        ] {
+            let _ = dst.execute(sql, params![instance_id]).await;
+        }
+
+        // Insert instance (skip parent_instance_id FK if parent missing on dest).
+        let parent_ok = if let Some(ref p) = parent_inst {
+            let mut r = dst
+                .query(
+                    "SELECT 1 FROM instances WHERE instance_id = ?1",
+                    params![p.as_str()],
+                )
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+            r.next()
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+                .is_some()
+        } else {
+            false
+        };
+        if parent_ok {
+            dst.execute(
+                r#"
+                INSERT INTO instances (
+                  instance_id, orchestration_name, orchestration_version,
+                  current_execution_id, custom_status, custom_status_version, parent_instance_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    instance_id,
+                    orch_name,
+                    orch_ver,
+                    cur_exec,
+                    custom_status,
+                    custom_ver,
+                    parent_inst
+                ],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        } else {
+            dst.execute(
+                r#"
+                INSERT INTO instances (
+                  instance_id, orchestration_name, orchestration_version,
+                  current_execution_id, custom_status, custom_status_version, parent_instance_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+                "#,
+                params![
+                    instance_id,
+                    orch_name,
+                    orch_ver,
+                    cur_exec,
+                    custom_status,
+                    custom_ver
+                ],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        }
+
+        // Executions
+        let mut exec_rows = src_conn
+            .query(
+                r#"
+                SELECT execution_id, status, output,
+                       duroxide_version_major, duroxide_version_minor, duroxide_version_patch
+                FROM executions WHERE instance_id = ?1
+                "#,
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        while let Some(row) = exec_rows
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+        {
+            let execution_id: i64 = row.get(0).unwrap_or(0);
+            let status: String = row.get(1).unwrap_or_else(|_| "Running".into());
+            let output: Option<String> = row.get(2).ok();
+            let maj: Option<i64> = row.get(3).ok();
+            let min: Option<i64> = row.get(4).ok();
+            let pat: Option<i64> = row.get(5).ok();
+            dst.execute(
+                r#"
+                INSERT INTO executions (
+                  instance_id, execution_id, status, output,
+                  duroxide_version_major, duroxide_version_minor, duroxide_version_patch
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![instance_id, execution_id, status, output, maj, min, pat],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        }
+        drop(exec_rows);
+
+        // History
+        let mut hist = src_conn
+            .query(
+                r#"
+                SELECT execution_id, event_id, event_type, event_data
+                FROM history WHERE instance_id = ?1
+                ORDER BY execution_id, event_id
+                "#,
+                params![instance_id],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+        let mut hist_n = 0u64;
+        while let Some(row) = hist
+            .next()
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+        {
+            let execution_id: i64 = row.get(0).unwrap_or(0);
+            let event_id: i64 = row.get(1).unwrap_or(0);
+            let event_type: String = row.get(2).unwrap_or_default();
+            let event_data: String = row.get(3).unwrap_or_default();
+            dst.execute(
+                r#"
+                INSERT INTO history (instance_id, execution_id, event_id, event_type, event_data)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![instance_id, execution_id, event_id, event_type, event_data],
+            )
+            .await
+            .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+            hist_n += 1;
+        }
+        drop(hist);
+
+        if include_kv {
+            let mut kvs = src_conn
+                .query(
+                    "SELECT key, value, last_updated_at_ms FROM kv_store WHERE instance_id = ?1",
+                    params![instance_id],
+                )
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+            while let Some(row) = kvs
+                .next()
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?
+            {
+                let key: String = row.get(0).unwrap_or_default();
+                let value: String = row.get(1).unwrap_or_default();
+                let ts: i64 = row.get(2).unwrap_or(0);
+                dst.execute(
+                    r#"
+                    INSERT INTO kv_store (instance_id, key, value, last_updated_at_ms)
+                    VALUES (?1, ?2, ?3, ?4)
+                    "#,
+                    params![instance_id, key, value, ts],
+                )
+                .await
+                .map_err(|e| Self::libsql_to_provider_error("import_instance_from", e))?;
+            }
+        }
+
+        if include_pins
+            && let Ok(mut pins) = src_conn
+                .query(
+                    r#"
+                    SELECT definition_name, definition_version, pinned_at_ms
+                    FROM process_definition_pins WHERE instance_id = ?1
+                    "#,
+                    params![instance_id],
+                )
+                .await
+            && let Ok(Some(row)) = pins.next().await
+        {
+            let name: String = row.get(0).unwrap_or_default();
+            let ver: String = row.get(1).unwrap_or_default();
+            let ts: i64 = row.get(2).unwrap_or(0);
+            let _ = dst
+                .execute(
+                    r#"
+                    INSERT INTO process_definition_pins
+                      (instance_id, definition_name, definition_version, pinned_at_ms)
+                    VALUES (?1, ?2, ?3, ?4)
+                    "#,
+                    params![instance_id, name, ver, ts],
+                )
+                .await;
+        }
+
+        Ok(hist_n)
+    }
+
     /// Append a promote audit row (best-effort table create).
     pub async fn record_promote_audit(
         &self,

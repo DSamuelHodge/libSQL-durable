@@ -45,8 +45,9 @@ pub use definitions::{
 };
 #[cfg(feature = "native-libsql")]
 pub use fork::{
-    ForkOptions, ForkResult, PromoteOptions, PromoteResult, discard_world_package,
-    fork_world_files, promote_world_package,
+    ForkOptions, ForkResult, PromoteOptions, PromoteResult, SelectivePromoteOptions,
+    SelectivePromoteResult, discard_world_package, fork_world_files, promote_world_package,
+    selective_promote_instances,
 };
 #[cfg(feature = "native-libsql")]
 pub use heal::{
@@ -68,7 +69,8 @@ pub use policy::{PolicyAuditRow, RuntimePolicy};
 #[cfg(feature = "native-libsql")]
 pub use world::{
     MIN_COMPATIBLE_SCHEMA_VERSION, SCHEMA_VERSION, WORLD_FORMAT_VERSION, WorldManifest,
-    WorldOpenReport, WorldPackagePaths, copy_world_package, open_world_checklist,
+    WorldOpenReport, WorldPackagePaths, copy_file_prefer_cow, copy_world_package,
+    open_world_checklist,
 };
 
 #[derive(Debug, thiserror::Error)]

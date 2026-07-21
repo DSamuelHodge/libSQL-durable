@@ -11,6 +11,9 @@ A **world package** is the portable unit of durable compute: one libSQL database
 | `world.db-wal` | Write-ahead log (may be absent after checkpoint) |
 | `world.db-shm` | Shared-memory index for WAL (may be absent) |
 
+**Copy:** `copy_world_package` prefers CoW/reflink when available (macOS `cp -c`,
+Linux `cp --reflink=auto`), otherwise full byte copy.
+
 Remote topologies (`sqld`, replica, offline-synced) are the same **logical** world
 with a different medium; packaging copy helpers apply to **file-backed** worlds.
 

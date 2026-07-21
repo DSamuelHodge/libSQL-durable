@@ -1,5 +1,8 @@
 # libSQL Durable Provider
 
+**Version 0.2.0** — PVM kernel + collapse finish line (host binary, definitions IR, fork/promote).  
+See [`CHANGELOG.md`](./CHANGELOG.md).
+
 This crate exposes a reusable native local + self-hosted libSQL durable
 execution provider for [Duroxide](https://docs.rs/duroxide/latest/duroxide/).
 It is intended for projects that want Duroxide orchestration state stored in

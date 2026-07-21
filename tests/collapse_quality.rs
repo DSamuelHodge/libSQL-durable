@@ -8,9 +8,9 @@ use duroxide::runtime;
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::{ActivityContext, Client, OrchestrationStatus};
 use libsql_durable::{
-    ForkOptions, INTERPRETED_ORCH_NAME, LibsqlProvider, PromoteOptions, discard_world_package,
-    interpreted_orchestrations, promote_world_package, validate_definition_body,
-    wrap_interpret_input,
+    ForkOptions, INTERPRETED_ORCH_NAME, LibsqlProvider, PromoteOptions, SelectivePromoteOptions,
+    discard_world_package, interpreted_orchestrations, promote_world_package,
+    selective_promote_instances, validate_definition_body, wrap_interpret_input,
 };
 
 fn activities() -> ActivityRegistry {
@@ -382,4 +382,125 @@ async fn promote_lineage_mismatch_refused() {
         err.to_string().contains("lineage") || err.to_string().contains("parent_world_id"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn selective_promote_imports_instance_into_live_parent() {
+    use duroxide::providers::Provider;
+    use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
+
+    let dir = tempfile::tempdir().unwrap();
+    let parent_path = dir.path().join("parent.db");
+    let child_path = dir.path().join("child.db");
+
+    let parent = LibsqlProvider::new_local(&parent_path).await.unwrap();
+    let parent_id = parent.world_manifest().await.unwrap().unwrap().world_id;
+    // Parent has its own instance
+    parent
+        .append_with_execution(
+            "keep-me",
+            INITIAL_EXECUTION_ID,
+            vec![Event::with_event_id(
+                INITIAL_EVENT_ID,
+                "keep-me".to_string(),
+                INITIAL_EXECUTION_ID,
+                None,
+                EventKind::OrchestrationStarted {
+                    name: "Keep".to_string(),
+                    version: "1.0.0".to_string(),
+                    input: "{}".to_string(),
+                    parent_instance: None,
+                    parent_id: None,
+                    carry_forward_events: None,
+                    initial_custom_status: None,
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+    let (fork, child) = parent
+        .fork_and_open(&parent_path, &child_path, ForkOptions::explore())
+        .await
+        .unwrap();
+    assert_eq!(fork.parent_world_id, parent_id);
+
+    // Child explores a new instance
+    child
+        .append_with_execution(
+            "explore-1",
+            INITIAL_EXECUTION_ID,
+            vec![Event::with_event_id(
+                INITIAL_EVENT_ID,
+                "explore-1".to_string(),
+                INITIAL_EXECUTION_ID,
+                None,
+                EventKind::OrchestrationStarted {
+                    name: "Explore".to_string(),
+                    version: "1.0.0".to_string(),
+                    input: r#"{"try":1}"#.to_string(),
+                    parent_instance: None,
+                    parent_id: None,
+                    carry_forward_events: None,
+                    initial_custom_status: None,
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    // Also mutate a forked copy of keep-me on child
+    child
+        .append_with_execution(
+            "keep-me",
+            INITIAL_EXECUTION_ID,
+            vec![Event::with_event_id(
+                2,
+                "keep-me".to_string(),
+                INITIAL_EXECUTION_ID,
+                None,
+                EventKind::OrchestrationCompleted {
+                    output: "child-version".to_string(),
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+    // Parent still has only 1 event on keep-me before selective promote
+    assert_eq!(parent.read("keep-me").await.unwrap().len(), 1);
+    assert!(parent.read("explore-1").await.unwrap().is_empty());
+
+    let result = selective_promote_instances(
+        &parent,
+        &child,
+        SelectivePromoteOptions::confirmed(["keep-me", "explore-1"]).with_note("import explore"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.parent_world_id, parent_id);
+    assert_eq!(result.imported_instances.len(), 2);
+    assert!(result.history_events_imported >= 2);
+
+    // Parent world_id unchanged; instances imported
+    assert_eq!(
+        parent.world_manifest().await.unwrap().unwrap().world_id,
+        parent_id
+    );
+    assert_eq!(parent.read("keep-me").await.unwrap().len(), 2);
+    assert_eq!(parent.read("explore-1").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cow_copy_produces_readable_world() {
+    use libsql_durable::copy_world_package;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("s.db");
+    let dst = dir.path().join("d.db");
+    let p = LibsqlProvider::new_local(&src).await.unwrap();
+    let id = p.world_manifest().await.unwrap().unwrap().world_id;
+    p.checkpoint_wal().await.unwrap();
+    drop(p);
+    copy_world_package(&src, &dst).unwrap();
+    let c = LibsqlProvider::new_local(&dst).await.unwrap();
+    assert_eq!(c.world_manifest().await.unwrap().unwrap().world_id, id);
 }
